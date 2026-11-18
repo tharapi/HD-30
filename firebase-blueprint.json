@@ -1,0 +1,156 @@
+{
+  "entities": {
+    "RehearsalPreset": {
+      "title": "RehearsalPreset",
+      "description": "Saved HD-300 Harmony Director rehearsal preset containing metronome, subdivision mix, pitch reference, temperament, and voice settings for an orchestra piece.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "title": {
+          "type": "string",
+          "description": "Piece or rehearsal exercise title (1-80 chars)."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Optional conductor or section rehearsal notes (0-300 chars)."
+        },
+        "bpm": {
+          "type": "integer",
+          "description": "Tempo in beats per minute (32-280)."
+        },
+        "timeSignature": {
+          "type": "string",
+          "enum": [
+            "TWO_FOUR",
+            "THREE_FOUR",
+            "FOUR_FOUR",
+            "FIVE_FOUR",
+            "SIX_EIGHT",
+            "NINE_EIGHT",
+            "TWELVE_EIGHT"
+          ],
+          "description": "Selected time signature."
+        },
+        "metronomeSound": {
+          "type": "string",
+          "enum": [
+            "WOODBLOCK",
+            "CLICK",
+            "BELL",
+            "RIMSHOT"
+          ],
+          "description": "Metronome percussion timbre."
+        },
+        "accentLevel": {
+          "type": "number",
+          "description": "Beat 1 accent slider gain (0.0-1.0)."
+        },
+        "quarterLevel": {
+          "type": "number",
+          "description": "Quarter-note beat slider gain (0.0-1.0)."
+        },
+        "eighthLevel": {
+          "type": "number",
+          "description": "Eighth-note subdivision slider gain (0.0-1.0)."
+        },
+        "tripletLevel": {
+          "type": "number",
+          "description": "Eighth-triplet subdivision slider gain (0.0-1.0)."
+        },
+        "sixteenthLevel": {
+          "type": "number",
+          "description": "Sixteenth-note subdivision slider gain (0.0-1.0)."
+        },
+        "alternateMuteBar": {
+          "type": "boolean",
+          "description": "Whether alternate bar mute drill is active."
+        },
+        "referencePitchHz": {
+          "type": "number",
+          "description": "Concert A4 reference frequency in Hz (430.0-450.0)."
+        },
+        "temperament": {
+          "type": "string",
+          "enum": [
+            "EQUAL",
+            "PURE"
+          ],
+          "description": "Intonation system: Equal or Pure Just Intonation."
+        },
+        "rootKeyIndex": {
+          "type": "integer",
+          "description": "Pitch class index of Just Intonation root (0=C through 11=B)."
+        },
+        "autoDetectRoot": {
+          "type": "boolean",
+          "description": "Whether root key tracks the lowest held note automatically."
+        },
+        "transposition": {
+          "type": "string",
+          "enum": [
+            "CONCERT_C",
+            "BB",
+            "EB",
+            "F"
+          ],
+          "description": "Instrument transposition key."
+        },
+        "voice": {
+          "type": "string",
+          "enum": [
+            "PURE_SINE",
+            "ORGAN",
+            "BRASS",
+            "WOODWIND",
+            "STRINGS",
+            "PIANO"
+          ],
+          "description": "Tone generator synthesis timbre."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when preset was created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when preset was last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "title",
+        "notes",
+        "bpm",
+        "timeSignature",
+        "metronomeSound",
+        "accentLevel",
+        "quarterLevel",
+        "eighthLevel",
+        "tripletLevel",
+        "sixteenthLevel",
+        "alternateMuteBar",
+        "referencePitchHz",
+        "temperament",
+        "rootKeyIndex",
+        "autoDetectRoot",
+        "transposition",
+        "voice",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/rehearsal_presets/{presetId}": {
+      "schema": {
+        "$ref": "#/entities/RehearsalPreset"
+      },
+      "description": "User-owned orchestra rehearsal presets."
+    }
+  }
+}

@@ -1,0 +1,88 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidRehearsalPreset(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
+             data.notes is string && data.notes.size() <= 300 &&
+             data.bpm is int && data.bpm >= 32 && data.bpm <= 280 &&
+             data.timeSignature in ['TWO_FOUR', 'THREE_FOUR', 'FOUR_FOUR', 'FIVE_FOUR', 'SIX_EIGHT', 'NINE_EIGHT', 'TWELVE_EIGHT'] &&
+             data.metronomeSound in ['WOODBLOCK', 'CLICK', 'BELL', 'RIMSHOT'] &&
+             data.accentLevel is number && data.accentLevel >= 0.0 && data.accentLevel <= 1.0 &&
+             data.quarterLevel is number && data.quarterLevel >= 0.0 && data.quarterLevel <= 1.0 &&
+             data.eighthLevel is number && data.eighthLevel >= 0.0 && data.eighthLevel <= 1.0 &&
+             data.tripletLevel is number && data.tripletLevel >= 0.0 && data.tripletLevel <= 1.0 &&
+             data.sixteenthLevel is number && data.sixteenthLevel >= 0.0 && data.sixteenthLevel <= 1.0 &&
+             data.alternateMuteBar is bool &&
+             data.referencePitchHz is number && data.referencePitchHz >= 430.0 && data.referencePitchHz <= 450.0 &&
+             data.temperament in ['EQUAL', 'PURE'] &&
+             data.rootKeyIndex is int && data.rootKeyIndex >= 0 && data.rootKeyIndex <= 11 &&
+             data.autoDetectRoot is bool &&
+             data.transposition in ['CONCERT_C', 'BB', 'EB', 'F'] &&
+             data.voice in ['PURE_SINE', 'ORGAN', 'BRASS', 'WOODWIND', 'STRINGS', 'PIANO'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/rehearsal_presets/{presetId} {
+      allow get: if isOwner(userId) && isValidId(presetId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(presetId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'title', 'notes', 'bpm', 'timeSignature', 'metronomeSound',
+                         'accentLevel', 'quarterLevel', 'eighthLevel', 'tripletLevel', 'sixteenthLevel',
+                         'alternateMuteBar', 'referencePitchHz', 'temperament', 'rootKeyIndex',
+                         'autoDetectRoot', 'transposition', 'voice', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'title', 'notes', 'bpm', 'timeSignature', 'metronomeSound',
+                         'accentLevel', 'quarterLevel', 'eighthLevel', 'tripletLevel', 'sixteenthLevel',
+                         'alternateMuteBar', 'referencePitchHz', 'temperament', 'rootKeyIndex',
+                         'autoDetectRoot', 'transposition', 'voice', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidRehearsalPreset(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(presetId) &&
+                       isValidRehearsalPreset(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'notes', 'bpm', 'timeSignature', 'metronomeSound',
+                         'accentLevel', 'quarterLevel', 'eighthLevel', 'tripletLevel', 'sixteenthLevel',
+                         'alternateMuteBar', 'referencePitchHz', 'temperament', 'rootKeyIndex',
+                         'autoDetectRoot', 'transposition', 'voice', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(presetId);
+    }
+  }
+}

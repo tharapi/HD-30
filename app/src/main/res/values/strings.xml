@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Harmony Director</string>
+    <string name="console_subtitle">HD-300 Orchestra Studio</string>
+    <string name="sign_in_headline">Harmony Director HD</string>
+    <string name="sign_in_subtitle">School Orchestra Rehearsal Console</string>
+    <string name="sign_in_description">Sign in with Google to sync your ensemble tempos, Pure Just Intonation settings, and rehearsal piece presets across devices.</string>
+    <string name="sign_in_with_google">Sign in with Google</string>
+    <string name="sign_out">Sign Out</string>
+    <string name="tab_harmony">Harmony</string>
+    <string name="tab_metronome">Metronome</string>
+    <string name="tab_presets">Presets</string>
+    <string name="panic_stop_all">All Sound Off</string>
+    <string name="chord_hold">Chord Hold</string>
+    <string name="clear_held">Clear</string>
+    <string name="save_preset">Save Preset</string>
+    <string name="tap_tempo">TAP</string>
+    <string name="alternate_mute_bar">Mute Drill (1/1 Bar)</string>
+    <string name="cd_beat_led">Metronome Beat Indicator</string>
+    <string name="cd_stop_all">Stop all sustained notes and metronome</string>
+    <string name="cd_play_metronome">Start or stop metronome</string>
+</resources>
