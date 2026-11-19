@@ -382,4 +382,59 @@ class HarmonyAudioEngineTest {
             assertTrue("Expected clip-free combined peak <= 25400 for WAV $sound, got $combinedPeak", combinedPeak <= 25400)
         }
     }
+
+    @Test
+    fun bundledHarmonyInstrumentAssetsDecodeLoopAndMixLinearly() {
+        val assetsRoot = listOf(File("src/main/assets/samples"), File("app/src/main/assets/samples"))
+            .firstOrNull { it.isDirectory }
+            ?: throw AssertionError("Expected assets/samples directory to exist")
+
+        val voiceDirs = mapOf(
+            ToneVoice.ORGAN to "organ",
+            ToneVoice.BRASS to "brass",
+            ToneVoice.WOODWIND to "woodwind",
+            ToneVoice.PIANO to "piano"
+        )
+        val banks = voiceDirs.mapValues { (voice, folderName) ->
+            val dir = File(assetsRoot, folderName)
+            assertTrue("Expected sample directory for $voice: ${dir.path}", dir.isDirectory)
+            val wavFiles = dir.listFiles { f -> f.isFile && f.name.endsWith(".wav") }?.sortedBy { it.name }.orEmpty()
+            assertTrue("Expected multi-sample WAVs for $voice", wavFiles.size >= 14)
+            wavFiles.map { wavFile ->
+                val fallbackMidi = wavFile.name.removePrefix("m").removeSuffix(".wav").toIntOrNull() ?: 60
+                val zone = WavSampleDecoder.decodeInstrumentZone(wavFile.readBytes(), fallbackMidi)
+                assertNotNull("Expected WAV to decode cleanly: ${wavFile.path}", zone)
+                val z = zone!!
+                assertEquals("Expected 44.1 kHz sample rate for ${wavFile.name}", 44100, z.sampleRate)
+                if (voice == ToneVoice.PIANO) {
+                    assertTrue("Expected one-shot (no loop) for PIANO ${wavFile.name}", !z.hasLoop)
+                } else {
+                    assertTrue("Expected valid smpl loop points for $voice ${wavFile.name}", z.hasLoop)
+                }
+                z
+            }
+        }
+
+        // Just Intonation C Major triad (C4, E4 -13.7c, G4 +2.0c)
+        val justChord = mapOf(60 to 261.6256, 64 to 327.0320, 67 to 392.4383)
+        for (voice in voiceDirs.keys) {
+            val engine = HarmonyAudioEngine().apply {
+                setInstrumentBanks(banks)
+                setToneVoice(voice)
+                setToneGain(0.85f)
+                updateActiveNotes(justChord)
+            }
+            // Render ~2.13 seconds (200 frames = 102,400 samples @ 48 kHz) covering multiple loop cycles
+            val pcm = renderStereo(engine, 200)
+            val overallPeak = pcm.left.maxOf { abs(it.toInt()) }
+            assertTrue("Expected audible playback for $voice, got peak=$overallPeak", overallPeak > 2000)
+            assertTrue("Expected tone ceiling <= 8900 (-11.3 dBFS) for $voice, got $overallPeak", overallPeak <= 8900)
+
+            if (voice != ToneVoice.PIANO) {
+                // Sustained voices must remain continuously active well past initial 1.5s loop boundary
+                val tailSlicePeak = pcm.left.copyOfRange(80000, pcm.left.size).maxOf { abs(it.toInt()) }
+                assertTrue("Expected sustained looping past 1.6s for $voice, got tailPeak=$tailSlicePeak", tailSlicePeak > 1500)
+            }
+        }
+    }
 }

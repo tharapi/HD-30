@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.round
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -49,7 +50,10 @@ private class ActiveVoice(
     var phase: Double = 0.0,
     var phaseDetune: Double = 0.0,
     var env: Double = 0.0,
-    var ageSamples: Long = 0L
+    var ageSamples: Long = 0L,
+    var sampleZone: InstrumentSampleZone? = null,
+    var sampleVoice: ToneVoice? = null,
+    var samplePos: Double = 0.0
 )
 
 private class PercussionVoice(
@@ -135,6 +139,63 @@ class HarmonyAudioEngine(context: Context? = null) {
             }
             return loaded
         }
+
+        private fun loadBundledInstrumentBanks(context: Context): Map<ToneVoice, List<InstrumentSampleZone>> {
+            // Bundled orchestral multi-samples from VSCO 2 Community Edition (CC0-1.0),
+            // pitch-calibrated to A4=440 Hz with phase-aligned seamless crossfade loops in 'smpl':
+            //   ORGAN    -> Keys/Organ/Quiet (21 zones, C2..C7)
+            //   BRASS    -> Tuba + French Horn + Trumpet non-vibrato sustain (16 zones, F1..C6)
+            //   WOODWIND -> Bassoon + Clarinet + Flute non-vibrato sustain (18 zones, Bb1..C7)
+            //   PIANO    -> Keys/Upright Nr1 natural decay (14 zones, C1..G7)
+            // PURE_SINE and STRINGS intentionally remain synthesized.
+            val dirMap = mapOf(
+                ToneVoice.ORGAN to "samples/organ",
+                ToneVoice.BRASS to "samples/brass",
+                ToneVoice.WOODWIND to "samples/woodwind",
+                ToneVoice.PIANO to "samples/piano"
+            )
+            val assets = context.assets
+            val banks = HashMap<ToneVoice, List<InstrumentSampleZone>>(dirMap.size)
+            for ((voice, dir) in dirMap) {
+                try {
+                    val files = assets.list(dir)?.filter { it.endsWith(".wav", ignoreCase = true) }?.sorted()
+                        ?: continue
+                    val zones = ArrayList<InstrumentSampleZone>(files.size)
+                    for (fileName in files) {
+                        val fallbackMidi = fileName.removePrefix("m").removeSuffix(".wav").toIntOrNull() ?: 60
+                        assets.open("$dir/$fileName").use { stream ->
+                            WavSampleDecoder.decodeInstrumentZone(stream, fallbackMidi)?.let { zone ->
+                                if (zone.pcm.isNotEmpty()) {
+                                    zones.add(zone)
+                                }
+                            }
+                        }
+                    }
+                    if (zones.isNotEmpty()) {
+                        zones.sortBy { it.rootFreqHz }
+                        banks[voice] = zones
+                    }
+                } catch (_: Throwable) {
+                    // Fall back cleanly to synthesized voice if asset loading fails
+                }
+            }
+            return banks
+        }
+
+        private fun findNearestZone(zones: List<InstrumentSampleZone>, freqHz: Double): InstrumentSampleZone {
+            var best = zones[0]
+            val safeFreq = freqHz.coerceAtLeast(16.0)
+            var bestDist = abs(ln(safeFreq / best.rootFreqHz))
+            for (i in 1 until zones.size) {
+                val cand = zones[i]
+                val dist = abs(ln(safeFreq / cand.rootFreqHz))
+                if (dist < bestDist) {
+                    bestDist = dist
+                    best = cand
+                }
+            }
+            return best
+        }
     }
 
     private val engineLock = Any()
@@ -143,9 +204,25 @@ class HarmonyAudioEngine(context: Context? = null) {
     private var renderThread: Thread? = null
     @Volatile internal var activeSampleRate: Int = SAMPLE_RATE
 
-    // Bundled acoustic metronome sample bank (immutable map swapped atomically)
+    // Bundled acoustic sample banks (immutable maps swapped atomically)
     @Volatile private var metronomeSamples: Map<MetronomeSound, DecodedWavSample> =
         if (context != null) loadBundledMetronomeSamples(context.applicationContext ?: context) else emptyMap()
+    @Volatile private var instrumentBanks: Map<ToneVoice, List<InstrumentSampleZone>> = emptyMap()
+
+    init {
+        if (context != null) {
+            val appCtx = context.applicationContext ?: context
+            Thread({
+                val loaded = loadBundledInstrumentBanks(appCtx)
+                if (loaded.isNotEmpty()) {
+                    instrumentBanks = loaded
+                }
+            }, "HarmonySampleLoader").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
 
     // Polyphonic synth state
     private val voices = mutableListOf<ActiveVoice>()
@@ -188,6 +265,10 @@ class HarmonyAudioEngine(context: Context? = null) {
 
     internal fun setMetronomeSamples(samples: Map<MetronomeSound, DecodedWavSample>) {
         metronomeSamples = samples.toMap()
+    }
+
+    internal fun setInstrumentBanks(banks: Map<ToneVoice, List<InstrumentSampleZone>>) {
+        instrumentBanks = banks.mapValues { (_, list) -> list.sortedBy { it.rootFreqHz } }
     }
 
     fun startEngine() {
@@ -322,12 +403,19 @@ class HarmonyAudioEngine(context: Context? = null) {
         synchronized(stateLock) {
             val wasSilent = voices.isEmpty()
 
-            // Mark existing voices not in map for release
+            // Mark existing voices not in map for release; reset attack if re-striking a releasing voice
             for (voice in voices) {
                 val updatedFreq = noteFrequencies[voice.writtenMidi]
                 if (updatedFreq != null) {
+                    val wasReleasing = voice.releasing
                     voice.frequencyHz = updatedFreq
                     voice.releasing = false
+                    if (wasReleasing) {
+                        voice.ageSamples = 0L
+                        voice.sampleZone = null
+                        voice.sampleVoice = null
+                        voice.samplePos = 0.0
+                    }
                 } else {
                     voice.releasing = true
                 }
@@ -340,6 +428,9 @@ class HarmonyAudioEngine(context: Context? = null) {
                         existingReleasing.frequencyHz = freq
                         existingReleasing.releasing = false
                         existingReleasing.ageSamples = 0L
+                        existingReleasing.sampleZone = null
+                        existingReleasing.sampleVoice = null
+                        existingReleasing.samplePos = 0.0
                     } else {
                         if (voices.size >= 16) {
                             val quietestReleasing = voices
@@ -780,15 +871,87 @@ class HarmonyAudioEngine(context: Context? = null) {
     }
 
     private fun synthesizeVoiceSample(v: ActiveVoice, timbre: ToneVoice, sr: Double): Double {
+        v.ageSamples++
+        val srScale = 44100.0 / sr
+
+        val zones = instrumentBanks[timbre]
+        if (zones != null && zones.isNotEmpty()) {
+            var zone = v.sampleZone
+            val needsRebind = v.sampleVoice != timbre ||
+                zone == null ||
+                (!v.releasing && (v.frequencyHz / zone.rootFreqHz !in 0.72..1.38))
+            if (needsRebind) {
+                zone = findNearestZone(zones, v.frequencyHz)
+                v.sampleZone = zone
+                v.sampleVoice = timbre
+                v.samplePos = 0.0
+                if (v.env > 0.0) {
+                    v.env = 0.0
+                }
+            }
+            val activeZone = zone!!
+
+            val attackRate = (if (timbre == ToneVoice.PIANO) 0.015 else 0.005) * srScale
+            val releaseRate = (if (timbre == ToneVoice.PIANO) 0.0018 else 0.0012) * srScale
+            if (v.releasing) {
+                v.env = (v.env - releaseRate).coerceAtLeast(0.0)
+            } else {
+                v.env = (v.env + attackRate).coerceAtMost(1.0)
+            }
+
+            val pcm = activeZone.pcm
+            val lastIdx = pcm.size - 1
+            if (lastIdx < 1) return 0.0
+
+            val step = (activeZone.sampleRate.toDouble() / sr) * (v.frequencyHz / activeZone.rootFreqHz)
+            var pos = v.samplePos
+            if (activeZone.hasLoop) {
+                val loopStart = activeZone.loopStart.toDouble()
+                val loopLen = (activeZone.loopEnd - activeZone.loopStart).toDouble()
+                if (pos >= activeZone.loopEnd.toDouble()) {
+                    pos = loopStart + ((pos - loopStart) % loopLen)
+                }
+            } else if (pos >= lastIdx.toDouble()) {
+                v.env = 0.0
+                v.releasing = true
+                return 0.0
+            }
+
+            val idx = pos.toInt()
+            val frac = pos - idx
+            val invScale = 1.0 / 32768.0
+            val s0 = pcm[(idx - 1).coerceIn(0, lastIdx)] * invScale
+            val s1 = pcm[idx.coerceIn(0, lastIdx)] * invScale
+            val s2 = pcm[(idx + 1).coerceIn(0, lastIdx)] * invScale
+            val s3 = pcm[(idx + 2).coerceIn(0, lastIdx)] * invScale
+
+            // 4-point Catmull-Rom cubic interpolation for clean pitch shifting & Just Intonation
+            val c0 = s1
+            val c1 = 0.5 * (s2 - s0)
+            val c2 = s0 - 2.5 * s1 + 2.0 * s2 - 0.5 * s3
+            val c3 = 0.5 * (s3 - s0) + 1.5 * (s1 - s2)
+            val sample = ((c3 * frac + c2) * frac + c1) * frac + c0
+
+            pos += step
+            if (activeZone.hasLoop && pos >= activeZone.loopEnd.toDouble()) {
+                val loopStart = activeZone.loopStart.toDouble()
+                val loopLen = (activeZone.loopEnd - activeZone.loopStart).toDouble()
+                pos = loopStart + ((pos - loopStart) % loopLen)
+            }
+            v.samplePos = pos
+            return sample
+        }
+
+        // Synthesized path (PURE_SINE, STRINGS, and fallback before async sample load completes)
+        v.sampleZone = null
+        v.sampleVoice = timbre
         val inc = TWO_PI * v.frequencyHz / sr
         v.phase += inc
         if (v.phase >= TWO_PI) {
             v.phase -= TWO_PI
         }
-        v.ageSamples++
 
         // Sample-rate-independent envelope timing
-        val srScale = 44100.0 / sr
         val attackRate = when (timbre) {
             ToneVoice.STRINGS -> 0.0008
             ToneVoice.WOODWIND -> 0.0022
