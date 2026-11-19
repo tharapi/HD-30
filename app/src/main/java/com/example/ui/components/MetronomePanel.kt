@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
@@ -70,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.audio.MetronomeBeatSnapshot
+import com.example.model.AudioOutputMode
 import com.example.model.MetronomeSound
 import com.example.model.SubdivisionMix
 import com.example.model.TimeSignature
@@ -105,7 +107,9 @@ fun MetronomePanel(
     onSubdivisionMixChanged: ((SubdivisionMix) -> SubdivisionMix) -> Unit,
     onMetronomeGainChanged: (Float) -> Unit,
     onToggleMuteBar: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    audioOutputMode: AudioOutputMode = AudioOutputMode.MIXED,
+    onAudioOutputModeSelected: (AudioOutputMode) -> Unit = {}
 ) {
     Column(
         modifier = modifier.verticalScroll(rememberScrollState()),
@@ -376,6 +380,78 @@ fun MetronomePanel(
                             checkedThumbColor = StudioCharcoal,
                             checkedTrackColor = WarmAmber
                         )
+                    )
+                }
+
+                HorizontalDivider(color = HardwareBorder.copy(alpha = 0.7f))
+
+                // Stereo Output Routing (Mixed L+R vs Split L: Harmony / R: Metronome)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            tint = if (audioOutputMode == AudioOutputMode.SPLIT_LR) WarmAmber else ElectricSky,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Audio Output Routing (PA / 3.5mm)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MutedSlateText
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AudioOutputMode.entries.forEach { mode ->
+                            val selected = audioOutputMode == mode
+                            val accent = if (mode == AudioOutputMode.SPLIT_LR) WarmAmber else ElectricSky
+                            val accentContainer = if (mode == AudioOutputMode.SPLIT_LR) {
+                                WarmAmberContainer
+                            } else {
+                                ElectricSkyContainer
+                            }
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onAudioOutputModeSelected(mode) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("output_mode_${mode.name.lowercase()}"),
+                                label = {
+                                    Box(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = mode.label,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    }
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    containerColor = ConsoleSurface,
+                                    selectedContainerColor = accentContainer,
+                                    selectedLabelColor = accent
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = selected,
+                                    borderColor = HardwareBorder,
+                                    selectedBorderColor = accent
+                                )
+                            )
+                        }
+                    }
+                    Text(
+                        text = audioOutputMode.description,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (audioOutputMode == AudioOutputMode.SPLIT_LR) WarmAmber else MutedSlateText
                     )
                 }
             }

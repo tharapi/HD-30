@@ -1,10 +1,12 @@
 package com.example
 
 import com.example.audio.HarmonyAudioEngine
+import com.example.model.AudioOutputMode
 import com.example.model.MetronomeSound
 import com.example.model.SubdivisionMix
 import com.example.model.TimeSignature
 import com.example.model.ToneVoice
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
@@ -16,15 +18,23 @@ import kotlin.math.sin
 
 class HarmonyAudioEngineTest {
 
-    private fun renderSamples(engine: HarmonyAudioEngine, frames: Int): ShortArray {
+    private data class StereoPcm(val left: ShortArray, val right: ShortArray)
+
+    private fun renderStereo(engine: HarmonyAudioEngine, frames: Int): StereoPcm {
         val frameSize = HarmonyAudioEngine.FRAME_SAMPLES
-        val total = ShortArray(frames * frameSize)
-        val buf = ShortArray(frameSize)
+        val totalSamples = frames * frameSize
+        val left = ShortArray(totalSamples)
+        val right = ShortArray(totalSamples)
+        val buf = ShortArray(frameSize * 2)
         for (f in 0 until frames) {
-            engine.renderFrame(buf)
-            buf.copyInto(total, destinationOffset = f * frameSize)
+            engine.renderStereoFrame(buf)
+            val base = f * frameSize
+            for (i in 0 until frameSize) {
+                left[base + i] = buf[i * 2]
+                right[base + i] = buf[i * 2 + 1]
+            }
         }
-        return total
+        return StereoPcm(left, right)
     }
 
     private fun dftAmplitude(samples: ShortArray, start: Int, length: Int, freqHz: Double): Double {
@@ -73,16 +83,19 @@ class HarmonyAudioEngineTest {
                     setMetronomePlaying(true)
                 }
 
-                // Render ~0.7 seconds (60 frames = 30,720 samples covering multiple beats & subdivisions)
-                val pcmTone = renderSamples(toneOnly, 60)
-                val pcmMetro = renderSamples(metroOnly, 60)
-                val pcmBoth = renderSamples(both, 60)
+                // Render ~0.64 seconds at 48 kHz (60 frames = 30,720 stereo frames)
+                val pcmTone = renderStereo(toneOnly, 60)
+                val pcmMetro = renderStereo(metroOnly, 60)
+                val pcmBoth = renderStereo(both, 60)
 
                 var maxDiff = 0
-                for (i in pcmBoth.indices) {
-                    val expected = pcmTone[i].toInt() + pcmMetro[i].toInt()
-                    val diff = abs(pcmBoth[i].toInt() - expected)
-                    if (diff > maxDiff) maxDiff = diff
+                for (i in pcmBoth.left.indices) {
+                    val expectedL = pcmTone.left[i].toInt() + pcmMetro.left[i].toInt()
+                    val expectedR = pcmTone.right[i].toInt() + pcmMetro.right[i].toInt()
+                    val diffL = abs(pcmBoth.left[i].toInt() - expectedL)
+                    val diffR = abs(pcmBoth.right[i].toInt() - expectedR)
+                    if (diffL > maxDiff) maxDiff = diffL
+                    if (diffR > maxDiff) maxDiff = diffR
                 }
 
                 // Isolated dual-bus summing guarantees strictly linear superposition within 1-2 LSB rounding
@@ -113,24 +126,24 @@ class HarmonyAudioEngineTest {
             setMetronomePlaying(true)
         }
 
-        val pcmMetro = renderSamples(metroOnly, 80)
-        val pcmBoth = renderSamples(both, 80)
+        val pcmMetro = renderStereo(metroOnly, 90)
+        val pcmBoth = renderStereo(both, 90)
 
         // Isolate the tone component from the combined output
-        val isolatedTone = ShortArray(pcmBoth.size) { i ->
-            (pcmBoth[i].toInt() - pcmMetro[i].toInt())
+        val isolatedTone = ShortArray(pcmBoth.left.size) { i ->
+            (pcmBoth.left[i].toInt() - pcmMetro.left[i].toInt())
                 .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                 .toShort()
         }
 
-        // Skip initial attack (~15ms = 660 samples) and measure fundamental amplitude across beats.
-        // 2205 samples at 44,100 Hz = exactly 22.0 cycles of 440 Hz (zero spectral leakage).
-        val win = 2205
+        // Skip initial attack (~15ms = 720 samples) and measure fundamental amplitude across beats.
+        // 2400 samples at 48,000 Hz = exactly 22.0 cycles of 440 Hz (zero spectral leakage).
+        val win = 2400
         val amplitudes = mutableListOf<Double>()
-        var offset = 2000
+        var offset = 2400
         while (offset + win < isolatedTone.size) {
             amplitudes.add(dftAmplitude(isolatedTone, offset, win, freqHz))
-            offset += 500
+            offset += 600
         }
 
         val minAmp = amplitudes.min()
@@ -139,15 +152,15 @@ class HarmonyAudioEngineTest {
         assertTrue("Expected sustained tone ripple < 0.05 dB, got $rippleDb dB", rippleDb < 0.05)
 
         // Pure Sine below bus knee should have negligible 3rd harmonic distortion (<-70 dB).
-        // 4410 samples = exactly 44.0 cycles of 440 Hz and 132.0 cycles of 1320 Hz.
-        val h1 = dftAmplitude(isolatedTone, 4000, 4410, freqHz)
-        val h3 = dftAmplitude(isolatedTone, 4000, 4410, freqHz * 3.0)
+        // 4800 samples at 48,000 Hz = exactly 44.0 cycles of 440 Hz and 132.0 cycles of 1320 Hz.
+        val h1 = dftAmplitude(isolatedTone, 4800, 4800, freqHz)
+        val h3 = dftAmplitude(isolatedTone, 4800, 4800, freqHz * 3.0)
         val h3Db = 20.0 * log10((h3 + 1e-6) / h1)
         assertTrue("Expected 3rd harmonic < -70 dB for PURE_SINE, got $h3Db dB", h3Db < -70.0)
     }
 
     @Test
-    fun denseChordAndAllSubdivisionsStayWithinSafeHeadroom() {
+    fun denseChordAndAllSubdivisionsStayWithinSafeExternalSpeakerHeadroom() {
         val engine = HarmonyAudioEngine().apply {
             setToneVoice(ToneVoice.ORGAN)
             setToneGain(1.0f)
@@ -172,10 +185,13 @@ class HarmonyAudioEngineTest {
             setMetronomePlaying(true)
         }
 
-        val pcm = renderSamples(engine, 80)
-        val peak = pcm.maxOf { abs(it.toInt()) }
-        // Max ceiling is (0.48 + 0.38) * 32767 = 28180 -> guaranteed digital headroom without clipping
-        assertTrue("Expected peak <= 28500 (safe headroom below 0 dBFS), got $peak", peak <= 28500)
+        val pcm = renderStereo(engine, 90)
+        val peakL = pcm.left.maxOf { abs(it.toInt()) }
+        val peakR = pcm.right.maxOf { abs(it.toInt()) }
+        val peak = maxOf(peakL, peakR)
+        // Worst-case ceiling is (0.27 + 0.20) * 32767 = 15400 (-6.56 dBFS) to avoid triggering
+        // downstream 3.5mm AUX / Bluetooth speaker DSP limiters and AudioFlinger clipping.
+        assertTrue("Expected peak <= 15600 (<-6.4 dBFS safe headroom), got $peak", peak <= 15600)
     }
 
     @Test
@@ -187,17 +203,97 @@ class HarmonyAudioEngineTest {
         }
 
         // Warm up steady chord
-        val steady = renderSamples(engine, 20)
-        val steadyPeak = steady.copyOfRange(steady.size - 4096, steady.size).maxOf { abs(it.toInt()) }
+        val steady = renderStereo(engine, 24)
+        val steadyPeak = steady.left.copyOfRange(steady.left.size - 4096, steady.left.size).maxOf { abs(it.toInt()) }
 
         // Release all notes
         engine.updateActiveNotes(emptyMap())
-        val release = renderSamples(engine, 20)
-        val releasePeak = release.maxOf { abs(it.toInt()) }
+        val release = renderStereo(engine, 24)
+        val releasePeak = release.left.maxOf { abs(it.toInt()) }
 
         assertTrue(
             "Expected release peak ($releasePeak) not to jump above steady chord peak ($steadyPeak)",
             releasePeak <= steadyPeak + 10
         )
+    }
+
+    @Test
+    fun splitOutputModeCompletelyIsolatesHarmonyLeftAndMetronomeRight() {
+        val mix = SubdivisionMix(accent = 1.0f, quarter = 0.85f, eighth = 0.5f, triplet = 0.0f, sixteenth = 0.0f)
+
+        val toneRef = HarmonyAudioEngine().apply {
+            setOutputMode(AudioOutputMode.SPLIT_LR)
+            setToneVoice(ToneVoice.ORGAN)
+            setToneGain(0.85f)
+            updateActiveNotes(mapOf(60 to 261.6256, 64 to 329.6276, 67 to 391.9954))
+        }
+        val metroRef = HarmonyAudioEngine().apply {
+            setOutputMode(AudioOutputMode.SPLIT_LR)
+            setMetronomeGain(0.85f)
+            setMetronomeConfig(132, TimeSignature.FOUR_FOUR, MetronomeSound.CLICK, mix, false)
+            setMetronomePlaying(true)
+        }
+        val bothSplit = HarmonyAudioEngine().apply {
+            setOutputMode(AudioOutputMode.SPLIT_LR)
+            setToneVoice(ToneVoice.ORGAN)
+            setToneGain(0.85f)
+            setMetronomeGain(0.85f)
+            updateActiveNotes(mapOf(60 to 261.6256, 64 to 329.6276, 67 to 391.9954))
+            setMetronomeConfig(132, TimeSignature.FOUR_FOUR, MetronomeSound.CLICK, mix, false)
+            setMetronomePlaying(true)
+        }
+
+        val pcmTone = renderStereo(toneRef, 60)
+        val pcmMetro = renderStereo(metroRef, 60)
+        val pcmBoth = renderStereo(bothSplit, 60)
+
+        // Tone-only in SPLIT_LR must produce exact silence on Right channel
+        assertEquals("Expected zero Right-channel bleed for tone-only in SPLIT_LR", 0, pcmTone.right.maxOf { abs(it.toInt()) })
+        // Metronome-only in SPLIT_LR must produce exact silence on Left channel
+        assertEquals("Expected zero Left-channel bleed for metro-only in SPLIT_LR", 0, pcmMetro.left.maxOf { abs(it.toInt()) })
+
+        var maxLeftDiff = 0
+        var maxRightDiff = 0
+        for (i in pcmBoth.left.indices) {
+            val dL = abs(pcmBoth.left[i].toInt() - pcmTone.left[i].toInt())
+            val dR = abs(pcmBoth.right[i].toInt() - pcmMetro.right[i].toInt())
+            if (dL > maxLeftDiff) maxLeftDiff = dL
+            if (dR > maxRightDiff) maxRightDiff = dR
+        }
+        assertTrue("Expected Left channel = pure Harmony (<=1 LSB), got $maxLeftDiff", maxLeftDiff <= 1)
+        assertTrue("Expected Right channel = pure Metronome (<=1 LSB), got $maxRightDiff", maxRightDiff <= 1)
+    }
+
+    @Test
+    fun metronomeClicksAreShortCrispAndZeroStartWithoutTailArtifacts() {
+        for (sound in listOf(MetronomeSound.CLICK, MetronomeSound.WOODBLOCK)) {
+            val engine = HarmonyAudioEngine().apply {
+                setMetronomeGain(0.75f)
+                setMetronomeConfig(
+                    bpm = 60,
+                    timeSignature = TimeSignature.FOUR_FOUR,
+                    sound = sound,
+                    mix = SubdivisionMix(accent = 1.0f, quarter = 0.0f, eighth = 0.0f, triplet = 0.0f, sixteenth = 0.0f),
+                    alternateMuteBar = false
+                )
+                setMetronomePlaying(true)
+            }
+
+            // Render ~64 ms (6 frames = 3072 samples at 48 kHz) covering a single accent hit
+            val pcm = renderStereo(engine, 6)
+            assertEquals("Expected click to start at zero without DC step ($sound)", 0, pcm.left[0].toInt())
+
+            val peak = pcm.left.maxOf { abs(it.toInt()) }
+            assertTrue("Expected audible transient peak for $sound, got $peak", peak > 1500)
+            assertTrue("Expected clean unsaturated peak below ceiling for $sound, got $peak", peak < 6600)
+
+            // Verify crisp decay: after 18 ms (864 samples), residual must be silent (< 1% of peak)
+            val tailWindowStart = 864
+            val tailMax = pcm.left.copyOfRange(tailWindowStart, pcm.left.size).maxOf { abs(it.toInt()) }
+            assertTrue(
+                "Expected crisp transient decay within 18 ms for $sound (tailMax=$tailMax, peak=$peak)",
+                tailMax <= peak * 0.01 + 2
+            )
+        }
     }
 }

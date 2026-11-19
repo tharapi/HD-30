@@ -23,4 +23,5 @@
     <string name="midi_stop_scan">Stop Scan</string>
     <string name="midi_refresh_usb">Refresh USB</string>
     <string name="cd_midi_status">Open MIDI keyboard connection settings</string>
+    <string name="cd_audio_output_mode">Toggle audio output routing between Mixed and Split L/R</string>
 </resources>

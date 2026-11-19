@@ -9,6 +9,7 @@ import com.example.midi.MidiConnectionUiState
 import com.example.midi.MidiHardwareEvent
 import com.example.midi.MidiInputController
 import com.example.midi.MidiNoteStateTracker
+import com.example.model.AudioOutputMode
 import com.example.model.MetronomeSound
 import com.example.model.NotePitchInfo
 import com.example.model.PitchTheory
@@ -102,6 +103,9 @@ class ConsoleViewModel(
 
     private val _metronomeConfig = MutableStateFlow(MetronomeUiState())
     val metronomeState: StateFlow<MetronomeUiState> = _metronomeConfig.asStateFlow()
+
+    private val _audioOutputMode = MutableStateFlow(AudioOutputMode.MIXED)
+    val audioOutputMode: StateFlow<AudioOutputMode> = _audioOutputMode.asStateFlow()
 
     val beatSnapshot: StateFlow<MetronomeBeatSnapshot> = audioEngine.beatSnapshot
 
@@ -362,6 +366,26 @@ class ConsoleViewModel(
         val clamped = gain.coerceIn(0f, 1f)
         _metronomeConfig.update { it.copy(metronomeGain = clamped) }
         audioEngine.setMetronomeGain(clamped)
+    }
+
+    fun setAudioOutputMode(mode: AudioOutputMode) {
+        if (_audioOutputMode.value == mode) return
+        _audioOutputMode.value = mode
+        audioEngine.setOutputMode(mode)
+        val message = when (mode) {
+            AudioOutputMode.MIXED -> "Audio Output: Mixed (L+R)"
+            AudioOutputMode.SPLIT_LR -> "Audio Output: Split L/R (Left: Harmony · Right: Metronome)"
+        }
+        _snackbarEvents.tryEmit(message)
+    }
+
+    fun toggleAudioOutputMode() {
+        val next = if (_audioOutputMode.value == AudioOutputMode.MIXED) {
+            AudioOutputMode.SPLIT_LR
+        } else {
+            AudioOutputMode.MIXED
+        }
+        setAudioOutputMode(next)
     }
 
     fun stopAllSound() {
@@ -694,6 +718,7 @@ class ConsoleViewModel(
         audioEngine.setToneVoice(h.voice)
         audioEngine.setToneGain(h.toneGain)
         audioEngine.setMetronomeGain(m.metronomeGain)
+        audioEngine.setOutputMode(_audioOutputMode.value)
         pushMetronomeAudioConfig()
     }
 

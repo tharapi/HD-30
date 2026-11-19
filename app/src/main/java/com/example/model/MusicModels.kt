@@ -94,6 +94,23 @@ data class SubdivisionMix(
     val sixteenth: Float = 0.0f
 )
 
+enum class AudioOutputMode(
+    val shortLabel: String,
+    val label: String,
+    val description: String
+) {
+    MIXED(
+        shortLabel = "MIXED",
+        label = "Mixed (L+R)",
+        description = "Harmony & Metronome blended cleanly on both channels"
+    ),
+    SPLIT_LR(
+        shortLabel = "L/R SPLIT",
+        label = "Split L/R",
+        description = "Left = Harmony only · Right = Metronome only (3.5mm Y-cable / PA mixer)"
+    )
+}
+
 data class NotePitchInfo(
     val writtenMidi: Int,
     val soundingMidi: Int,

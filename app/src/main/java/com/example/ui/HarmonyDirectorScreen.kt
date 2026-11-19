@@ -71,6 +71,7 @@ fun HarmonyDirectorScreen(
 ) {
     val harmonyState by viewModel.harmonyState.collectAsStateWithLifecycle()
     val metronomeState by viewModel.metronomeState.collectAsStateWithLifecycle()
+    val audioOutputMode by viewModel.audioOutputMode.collectAsStateWithLifecycle()
     val presetsState by viewModel.presetsState.collectAsStateWithLifecycle()
     val activePresetId by viewModel.activePresetId.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
@@ -198,7 +199,9 @@ fun HarmonyDirectorScreen(
                             onStopAllSound = viewModel::stopAllSound,
                             onSignOut = onSignOut,
                             midiState = midiState,
-                            onOpenMidiSettings = { showMidiDialog = true }
+                            onOpenMidiSettings = { showMidiDialog = true },
+                            audioOutputMode = audioOutputMode,
+                            onToggleOutputMode = viewModel::toggleAudioOutputMode
                         )
 
                         when (expandedSection) {
@@ -219,6 +222,8 @@ fun HarmonyDirectorScreen(
                                         onSubdivisionMixChanged = viewModel::updateSubdivisionMix,
                                         onMetronomeGainChanged = viewModel::setMetronomeGain,
                                         onToggleMuteBar = viewModel::toggleAlternateMuteBar,
+                                        audioOutputMode = audioOutputMode,
+                                        onAudioOutputModeSelected = viewModel::setAudioOutputMode,
                                         modifier = Modifier
                                             .weight(1f)
                                             .fillMaxHeight()
@@ -279,7 +284,9 @@ fun HarmonyDirectorScreen(
                         onStopAllSound = viewModel::stopAllSound,
                         onSignOut = onSignOut,
                         midiState = midiState,
-                        onOpenMidiSettings = { showMidiDialog = true }
+                        onOpenMidiSettings = { showMidiDialog = true },
+                        audioOutputMode = audioOutputMode,
+                        onToggleOutputMode = viewModel::toggleAudioOutputMode
                     )
 
                     Box(modifier = Modifier.weight(1f)) {
@@ -311,7 +318,9 @@ fun HarmonyDirectorScreen(
                                 onMetronomeSoundSelected = viewModel::selectMetronomeSound,
                                 onSubdivisionMixChanged = viewModel::updateSubdivisionMix,
                                 onMetronomeGainChanged = viewModel::setMetronomeGain,
-                                onToggleMuteBar = viewModel::toggleAlternateMuteBar
+                                onToggleMuteBar = viewModel::toggleAlternateMuteBar,
+                                audioOutputMode = audioOutputMode,
+                                onAudioOutputModeSelected = viewModel::setAudioOutputMode
                             )
                             ConsoleTab.PRESETS -> PresetsPanel(
                                 presetsState = presetsState,

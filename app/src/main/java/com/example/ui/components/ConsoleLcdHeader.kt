@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.Cable
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -45,6 +46,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.audio.MetronomeBeatSnapshot
 import com.example.midi.MidiConnectionUiState
+import com.example.model.AudioOutputMode
 import com.example.model.PitchTheory
 import com.example.model.TemperamentMode
 import com.example.ui.HarmonyUiState
@@ -71,7 +73,9 @@ fun ConsoleLcdHeader(
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
     midiState: MidiConnectionUiState = MidiConnectionUiState(),
-    onOpenMidiSettings: () -> Unit = {}
+    onOpenMidiSettings: () -> Unit = {},
+    audioOutputMode: AudioOutputMode = AudioOutputMode.MIXED,
+    onToggleOutputMode: () -> Unit = {}
 ) {
     val hasActiveSound = harmonyState.activeWrittenMidis.isNotEmpty() || metronomeState.isPlaying
     val isMidiConnected = midiState.connectedDeviceName != null
@@ -236,55 +240,97 @@ fun ConsoleLcdHeader(
                 )
             }
 
-            // Fixed-height Active Notes & Pure Cent Deviation Readout Strip (prevents layout jumping on keypress)
-            Box(
+            // Fixed-height Active Notes Readout + Quick Audio Output Routing Toggle
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(28.dp),
-                contentAlignment = Alignment.CenterStart
+                    .height(32.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (harmonyState.activePitchInfos.isEmpty()) {
-                    Text(
-                        text = "READY · TAP KEYBOARD TO SOUND REFERENCE TONES",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MutedSlateText.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        harmonyState.activePitchInfos.forEach { info ->
-                            val centsText = if (harmonyState.temperament == TemperamentMode.PURE) {
-                                val sign = if (info.centsOffsetFromEt >= 0) "+" else ""
-                                String.format(Locale.US, " %s%.1f¢ (%s)", sign, info.centsOffsetFromEt, info.intervalName)
-                            } else {
-                                String.format(Locale.US, " %.1f Hz", info.frequencyHz)
-                            }
-                            val label = if (info.writtenName == info.soundingName) {
-                                "${info.soundingName}$centsText"
-                            } else {
-                                "${info.writtenName}→${info.soundingName}$centsText"
-                            }
-                            Surface(
-                                color = ConsoleSurface,
-                                shape = MaterialTheme.shapes.extraSmall,
-                                border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.4f))
-                            ) {
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = ElectricSky,
-                                    maxLines = 1,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (harmonyState.activePitchInfos.isEmpty()) {
+                        Text(
+                            text = "READY · TAP KEYBOARD TO SOUND REFERENCE TONES",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MutedSlateText.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            harmonyState.activePitchInfos.forEach { info ->
+                                val centsText = if (harmonyState.temperament == TemperamentMode.PURE) {
+                                    val sign = if (info.centsOffsetFromEt >= 0) "+" else ""
+                                    String.format(Locale.US, " %s%.1f¢ (%s)", sign, info.centsOffsetFromEt, info.intervalName)
+                                } else {
+                                    String.format(Locale.US, " %.1f Hz", info.frequencyHz)
+                                }
+                                val label = if (info.writtenName == info.soundingName) {
+                                    "${info.soundingName}$centsText"
+                                } else {
+                                    "${info.writtenName}→${info.soundingName}$centsText"
+                                }
+                                Surface(
+                                    color = ConsoleSurface,
+                                    shape = MaterialTheme.shapes.extraSmall,
+                                    border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.4f))
+                                ) {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = ElectricSky,
+                                        maxLines = 1,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
                             }
                         }
+                    }
+                }
+
+                val isSplit = audioOutputMode == AudioOutputMode.SPLIT_LR
+                val outputCd = stringResource(R.string.cd_audio_output_mode)
+                Surface(
+                    onClick = onToggleOutputMode,
+                    color = if (isSplit) WarmAmber.copy(alpha = 0.18f) else ConsoleSurface,
+                    shape = MaterialTheme.shapes.extraSmall,
+                    border = BorderStroke(
+                        1.dp,
+                        if (isSplit) WarmAmber else HardwareBorder
+                    ),
+                    modifier = Modifier
+                        .height(30.dp)
+                        .semantics { contentDescription = outputCd }
+                        .testTag("lcd_output_mode_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            tint = if (isSplit) WarmAmber else ElectricSky,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = if (isSplit) "L:TONE · R:CLK" else "OUT: MIX",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isSplit) WarmAmber else ElectricSky,
+                            maxLines = 1
+                        )
                     }
                 }
             }

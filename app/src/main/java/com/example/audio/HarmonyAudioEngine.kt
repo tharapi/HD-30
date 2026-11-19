@@ -2,26 +2,24 @@ package com.example.audio
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
+import android.os.Process
+import com.example.model.AudioOutputMode
 import com.example.model.MetronomeSound
 import com.example.model.SubdivisionMix
 import com.example.model.TimeSignature
 import com.example.model.ToneVoice
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.round
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.tanh
 import kotlin.random.Random
 
@@ -56,10 +54,15 @@ private class PercussionVoice(
     var active: Boolean = false,
     var ageSamples: Int = 0,
     var totalSamples: Int = 0,
+    var attackSamples: Int = 12,
     var phase: Double = 0.0,
     var phaseOver: Double = 0.0,
-    var freqStart: Double = 880.0,
-    var freqEnd: Double = 600.0,
+    var prevNoise: Double = 0.0,
+    var hpPrevIn: Double = 0.0,
+    var hpPrevOut: Double = 0.0,
+    var hpAlpha: Double = 0.89,
+    var freqStart: Double = 1480.0,
+    var freqEnd: Double = 1180.0,
     var gain: Double = 0.0,
     var sound: MetronomeSound = MetronomeSound.WOODBLOCK,
     var isAccent: Boolean = false
@@ -67,24 +70,50 @@ private class PercussionVoice(
 
 class HarmonyAudioEngine {
     companion object {
-        const val SAMPLE_RATE = 44100
+        // Default 48 kHz matches Android AudioFlinger native output on 3.5mm & Bluetooth A2DP,
+        // avoiding resampling and inter-sample peaks.
+        const val SAMPLE_RATE = 48000
         const val FRAME_SAMPLES = 512
         private const val TWO_PI = 2.0 * PI
-        private const val TONE_BUS_KNEE = 0.38
-        private const val TONE_BUS_CEILING = 0.48
-        private const val METRO_BUS_KNEE = 0.30
-        private const val METRO_BUS_CEILING = 0.38
+
+        // Dedicated per-bus headroom budgets for strictly linear summing with generous
+        // downstream safety margin:
+        // |toneLimited| <= 0.27 (-11.4 dBFS) and |metroLimited| <= 0.20 (-14.0 dBFS)
+        // => worst-case mixed peak <= 0.47 (-6.56 dBFS), keeping external 3.5mm AUX / PA /
+        // Bluetooth speaker DSP limiters and Android AudioFlinger comfortably below threshold.
+        private const val BASE_VOICE_NORM = 0.22
+        private const val TONE_BUS_KNEE = 0.23
+        private const val TONE_BUS_CEILING = 0.27
+        private const val METRO_BUS_KNEE = 0.16
+        private const val METRO_BUS_CEILING = 0.20
+
+        private const val GAIN_SMOOTH_COEFF = 0.005
+        private const val POLY_NORM_SMOOTH_COEFF = 0.0015
+        private const val SPLIT_MIX_SMOOTH_COEFF = 0.003
+
+        internal fun softLimitBus(sample: Double, knee: Double, ceiling: Double): Double {
+            val absVal = abs(sample)
+            if (absVal <= knee) return sample
+            val headroom = ceiling - knee
+            val excess = (absVal - knee) / headroom
+            val shaped = knee + headroom * tanh(excess)
+            return if (sample >= 0.0) shaped else -shaped
+        }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var renderJob: Job? = null
+    private val engineLock = Any()
     private val stateLock = Any()
+    @Volatile private var engineRunning: Boolean = false
+    private var renderThread: Thread? = null
+    @Volatile internal var activeSampleRate: Int = SAMPLE_RATE
 
     // Polyphonic synth state
     private val voices = mutableListOf<ActiveVoice>()
     @Volatile private var currentToneVoice: ToneVoice = ToneVoice.ORGAN
-    @Volatile private var masterToneGain: Double = 0.72
-    private var smoothedPolyNorm: Double = 0.36
+    @Volatile private var masterToneGain: Double = 0.80
+    private var targetPolyNorm: Double = BASE_VOICE_NORM
+    private var smoothedPolyNorm: Double = BASE_VOICE_NORM
+    private var smoothedToneGain: Double = 0.80
 
     // Metronome state
     @Volatile private var metronomePlaying: Boolean = false
@@ -94,6 +123,11 @@ class HarmonyAudioEngine {
     @Volatile private var subdivisionMix: SubdivisionMix = SubdivisionMix()
     @Volatile private var alternateMuteBar: Boolean = false
     @Volatile private var masterMetronomeGain: Double = 0.75
+    private var smoothedMetronomeGain: Double = 0.75
+
+    // Stereo output routing state (0.0 = MIXED L+R, 1.0 = SPLIT L: Harmony / R: Metronome)
+    @Volatile private var outputMode: AudioOutputMode = AudioOutputMode.MIXED
+    private var smoothedSplitMix: Double = 0.0
 
     // Beat clock state inside audio thread
     private var samplePosInBeat: Double = 0.0
@@ -113,60 +147,137 @@ class HarmonyAudioEngine {
     val beatSnapshot: StateFlow<MetronomeBeatSnapshot> = _beatSnapshot.asStateFlow()
 
     fun startEngine() {
-        if (renderJob?.isActive == true) return
-        renderJob = scope.launch {
-            val minBufBytes = try {
-                AudioTrack.getMinBufferSize(
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                ).coerceAtLeast(FRAME_SAMPLES * 4)
-            } catch (_: Throwable) {
-                FRAME_SAMPLES * 4
+        synchronized(engineLock) {
+            if (engineRunning && renderThread?.isAlive == true) return
+            engineRunning = true
+            val thread = Thread({ runAudioLoop() }, "HarmonyAudioEngine").apply {
+                isDaemon = true
             }
+            renderThread = thread
+            thread.start()
+        }
+    }
 
-            val audioTrack: AudioTrack? = try {
-                AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(minBufBytes)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-            } catch (_: Throwable) {
-                null
-            }
+    private fun runAudioLoop() {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        } catch (_: Throwable) {
+            // Safe fallback on non-Android JVM environments
+        }
 
+        val nativeRate = try {
+            AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
+        } catch (_: Throwable) {
+            SAMPLE_RATE
+        }
+        val resolvedSampleRate = if (nativeRate in 44100..96000) nativeRate else SAMPLE_RATE
+        activeSampleRate = resolvedSampleRate
+
+        val minBufBytes = try {
+            AudioTrack.getMinBufferSize(
+                resolvedSampleRate,
+                AudioFormat.CHANNEL_OUT_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(FRAME_SAMPLES * 4)
+        } catch (_: Throwable) {
+            FRAME_SAMPLES * 4
+        }
+
+        // Stereo 16-bit PCM = 4 bytes/frame; keep ~42-64 ms slack to prevent beat-synced
+        // underruns on wired 3.5mm & Bluetooth while keeping key-press response snappy.
+        val bufferBytes = maxOf(
+            minBufBytes,
+            minOf(minBufBytes * 2, 12288),
+            FRAME_SAMPLES * 8
+        )
+
+        val audioTrack = createAudioTrack(resolvedSampleRate, bufferBytes, lowLatency = true)
+            ?: createAudioTrack(resolvedSampleRate, bufferBytes, lowLatency = false)
+
+        if (audioTrack == null || audioTrack.state != AudioTrack.STATE_INITIALIZED) {
             try {
-                audioTrack?.play()
-                val pcmBuffer = ShortArray(FRAME_SAMPLES)
-                while (isActive) {
-                    renderFrame(pcmBuffer)
-                    audioTrack?.write(pcmBuffer, 0, pcmBuffer.size)
-                }
-            } finally {
-                try {
-                    audioTrack?.pause()
-                    audioTrack?.flush()
-                    audioTrack?.release()
-                } catch (_: Throwable) {
+                audioTrack?.release()
+            } catch (_: Throwable) {
+            }
+            synchronized(engineLock) {
+                engineRunning = false
+                renderThread = null
+            }
+            return
+        }
+
+        try {
+            audioTrack.play()
+            val pcmBuffer = ShortArray(FRAME_SAMPLES * 2)
+            while (engineRunning && !Thread.currentThread().isInterrupted) {
+                renderStereoFrame(pcmBuffer)
+                val written = audioTrack.write(
+                    pcmBuffer,
+                    0,
+                    pcmBuffer.size,
+                    AudioTrack.WRITE_BLOCKING
+                )
+                if (written < 0) break
+            }
+        } catch (_: Throwable) {
+        } finally {
+            try {
+                audioTrack.pause()
+                audioTrack.flush()
+                audioTrack.release()
+            } catch (_: Throwable) {
+            }
+            synchronized(engineLock) {
+                if (renderThread === Thread.currentThread()) {
+                    engineRunning = false
+                    renderThread = null
                 }
             }
         }
     }
 
+    private fun createAudioTrack(
+        sampleRate: Int,
+        bufferBytes: Int,
+        lowLatency: Boolean
+    ): AudioTrack? {
+        return try {
+            val builder = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferBytes)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+
+            if (lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            }
+            val track = builder.build()
+            if (track.state == AudioTrack.STATE_INITIALIZED) {
+                track
+            } else {
+                track.release()
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     fun updateActiveNotes(noteFrequencies: Map<Int, Double>) {
         synchronized(stateLock) {
+            val wasSilent = voices.isEmpty()
+
             // Mark existing voices not in map for release
             for (voice in voices) {
                 val updatedFreq = noteFrequencies[voice.writtenMidi]
@@ -180,7 +291,6 @@ class HarmonyAudioEngine {
             // Add newly pressed voices
             for ((midi, freq) in noteFrequencies) {
                 if (voices.none { it.writtenMidi == midi && !it.releasing }) {
-                    // Reuse releasing voice if same midi or add fresh
                     val existingReleasing = voices.firstOrNull { it.writtenMidi == midi }
                     if (existingReleasing != null) {
                         existingReleasing.frequencyHz = freq
@@ -201,6 +311,18 @@ class HarmonyAudioEngine {
                     }
                 }
             }
+
+            // Normalize polyphony based on actively held voices only so releasing a chord
+            // never pulls gain upward.
+            val heldCount = voices.count { !it.releasing }
+            if (heldCount > 0) {
+                val nextNorm = BASE_VOICE_NORM / sqrt(heldCount.toDouble())
+                targetPolyNorm = nextNorm
+                if (wasSilent) {
+                    smoothedPolyNorm = nextNorm
+                    smoothedToneGain = masterToneGain
+                }
+            }
         }
     }
 
@@ -209,11 +331,33 @@ class HarmonyAudioEngine {
     }
 
     fun setToneGain(gain: Float) {
-        masterToneGain = gain.toDouble().coerceIn(0.0, 1.0)
+        val clamped = gain.toDouble().coerceIn(0.0, 1.0)
+        masterToneGain = clamped
+        synchronized(stateLock) {
+            if (voices.isEmpty()) {
+                smoothedToneGain = clamped
+            }
+        }
     }
 
     fun setMetronomeGain(gain: Float) {
-        masterMetronomeGain = gain.toDouble().coerceIn(0.0, 1.0)
+        val clamped = gain.toDouble().coerceIn(0.0, 1.0)
+        masterMetronomeGain = clamped
+        synchronized(stateLock) {
+            if (!metronomePlaying) {
+                smoothedMetronomeGain = clamped
+            }
+        }
+    }
+
+    fun setOutputMode(mode: AudioOutputMode) {
+        outputMode = mode
+        val target = if (mode == AudioOutputMode.SPLIT_LR) 1.0 else 0.0
+        synchronized(stateLock) {
+            if (voices.isEmpty() && !metronomePlaying) {
+                smoothedSplitMix = target
+            }
+        }
     }
 
     fun setMetronomeConfig(
@@ -229,15 +373,27 @@ class HarmonyAudioEngine {
         this.metronomeSound = sound
         this.subdivisionMix = mix
         this.alternateMuteBar = alternateMuteBar
+        var idleSnapshot: MetronomeBeatSnapshot? = null
         if (tsChanged) {
             synchronized(stateLock) {
                 currentBeatInBar = currentBeatInBar.coerceAtMost(timeSignature.beatsPerMeasure - 1)
+                if (!metronomePlaying) {
+                    idleSnapshot = MetronomeBeatSnapshot(
+                        beatIndex = 0,
+                        totalBeats = timeSignature.beatsPerMeasure,
+                        isMutedBar = false,
+                        isPlaying = false,
+                        tickId = ++tickSeq
+                    )
+                }
             }
         }
+        idleSnapshot?.let { _beatSnapshot.value = it }
     }
 
     fun setMetronomePlaying(playing: Boolean) {
-        synchronized(stateLock) {
+        val pendingSnapshot: MetronomeBeatSnapshot? = synchronized(stateLock) {
+            var snapshot: MetronomeBeatSnapshot? = null
             if (playing && !metronomePlaying) {
                 samplePosInBeat = 0.0
                 currentBeatInBar = 0
@@ -247,9 +403,10 @@ class HarmonyAudioEngine {
                 firedTrip2 = false
                 firedSixteenth1 = false
                 firedSixteenth3 = false
-                triggerBeatBoundary(isFirstStart = true)
+                smoothedMetronomeGain = masterMetronomeGain
+                snapshot = triggerBeatBoundary()
             } else if (!playing) {
-                _beatSnapshot.value = MetronomeBeatSnapshot(
+                snapshot = MetronomeBeatSnapshot(
                     beatIndex = 0,
                     totalBeats = timeSignature.beatsPerMeasure,
                     isMutedBar = false,
@@ -258,16 +415,18 @@ class HarmonyAudioEngine {
                 )
             }
             metronomePlaying = playing
+            snapshot
         }
+        pendingSnapshot?.let { _beatSnapshot.value = it }
     }
 
     fun stopAllSound() {
-        synchronized(stateLock) {
+        val stoppedSnapshot: MetronomeBeatSnapshot = synchronized(stateLock) {
             for (voice in voices) {
                 voice.releasing = true
             }
             metronomePlaying = false
-            _beatSnapshot.value = MetronomeBeatSnapshot(
+            MetronomeBeatSnapshot(
                 beatIndex = 0,
                 totalBeats = timeSignature.beatsPerMeasure,
                 isMutedBar = false,
@@ -275,36 +434,60 @@ class HarmonyAudioEngine {
                 tickId = ++tickSeq
             )
         }
+        _beatSnapshot.value = stoppedSnapshot
     }
 
     fun release() {
-        renderJob?.cancel()
-        scope.cancel()
+        synchronized(engineLock) {
+            engineRunning = false
+            renderThread?.interrupt()
+            renderThread = null
+        }
     }
 
-    internal fun renderFrame(out: ShortArray) {
+    /**
+     * Renders interleaved stereo PCM frames into [out] (L0, R0, L1, R1, ...).
+     * In [AudioOutputMode.MIXED], both Left and Right receive the strictly linear sum of the
+     * independently bounded tone and metronome buses.
+     * In [AudioOutputMode.SPLIT_LR], Left receives Harmony only and Right receives Metronome only.
+     */
+    internal fun renderStereoFrame(out: ShortArray) {
+        val frameCount = out.size / 2
+        val sr = activeSampleRate.toDouble()
         val toneVoice = currentToneVoice
-        val toneGain = masterToneGain
-        val metroGain = masterMetronomeGain
+        val targetToneGain = masterToneGain
+        val targetMetroGain = masterMetronomeGain
+        val targetSplit = if (outputMode == AudioOutputMode.SPLIT_LR) 1.0 else 0.0
         val isMetroRunning = metronomePlaying
         val currentBpm = bpm
-        val samplesPerBeat = (SAMPLE_RATE * 60.0) / currentBpm.toDouble()
+        val samplesPerBeat = (sr * 60.0) / currentBpm.toDouble()
 
-        synchronized(stateLock) {
-            for (i in out.indices) {
-                // Count all sounding voices (including releasing) so releasing a chord never jumps gain upward
-                val soundingCount = voices.size.coerceAtLeast(1)
-                val targetPolyNorm = 0.36 / kotlin.math.sqrt(soundingCount.toDouble())
-                val normAlpha = if (targetPolyNorm < smoothedPolyNorm) 0.015 else 0.0015
-                smoothedPolyNorm += (targetPolyNorm - smoothedPolyNorm) * normAlpha
+        val pendingSnapshot: MetronomeBeatSnapshot? = synchronized(stateLock) {
+            var snapshot: MetronomeBeatSnapshot? = null
+            val heldCount = voices.count { !it.releasing }
+            if (heldCount > 0) {
+                targetPolyNorm = BASE_VOICE_NORM / sqrt(heldCount.toDouble())
+            }
+
+            for (i in 0 until frameCount) {
+                smoothedPolyNorm += (targetPolyNorm - smoothedPolyNorm) * POLY_NORM_SMOOTH_COEFF
+                smoothedToneGain += (targetToneGain - smoothedToneGain) * GAIN_SMOOTH_COEFF
+                smoothedMetronomeGain += (targetMetroGain - smoothedMetronomeGain) * GAIN_SMOOTH_COEFF
+
+                val splitDiff = targetSplit - smoothedSplitMix
+                if (abs(splitDiff) < 1e-5) {
+                    smoothedSplitMix = targetSplit
+                } else {
+                    smoothedSplitMix += splitDiff * SPLIT_MIX_SMOOTH_COEFF
+                }
 
                 // 1. Render Isolated Tone Bus
                 var toneSample = 0.0
                 var idx = voices.size - 1
                 while (idx >= 0) {
                     val v = voices[idx]
-                    val sampleVal = synthesizeVoiceSample(v, toneVoice)
-                    toneSample += sampleVal * v.env * smoothedPolyNorm * toneGain
+                    val sampleVal = synthesizeVoiceSample(v, toneVoice, sr)
+                    toneSample += sampleVal * v.env * smoothedPolyNorm * smoothedToneGain
 
                     if (v.releasing && v.env <= 0.0005) {
                         voices.removeAt(idx)
@@ -330,7 +513,7 @@ class HarmonyAudioEngine {
                             currentBeatInBar = 0
                             barCounter++
                         }
-                        triggerBeatBoundary(isFirstStart = false)
+                        snapshot = triggerBeatBoundary()
                     } else {
                         val isMuted = alternateMuteBar && (barCounter % 2 == 1)
                         if (!isMuted) {
@@ -378,32 +561,35 @@ class HarmonyAudioEngine {
                 var metroSample = 0.0
                 for (p in percPool) {
                     if (p.active) {
-                        metroSample += synthesizePercussionSample(p) * metroGain
+                        metroSample += synthesizePercussionSample(p, sr) * smoothedMetronomeGain
                     }
                 }
 
-                // 4. Independent Bus Soft-Knee Limiting + Strictly Linear Summing
-                // Prevents metronome transients from cross-modulating sustained reference tones
+                // 4. Independent Bus Soft-Knee Limiting + Strictly Linear Summing / Stereo Split
                 val toneLimited = softLimitBus(toneSample, TONE_BUS_KNEE, TONE_BUS_CEILING)
                 val metroLimited = softLimitBus(metroSample, METRO_BUS_KNEE, METRO_BUS_CEILING)
-                val combined = toneLimited + metroLimited
-                out[i] = round(combined * 32767.0)
+
+                val crossFeed = 1.0 - smoothedSplitMix
+                val left = toneLimited + metroLimited * crossFeed
+                val right = metroLimited + toneLimited * crossFeed
+
+                val base = i * 2
+                out[base] = round(left * 32767.0)
+                    .toInt()
+                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                    .toShort()
+                out[base + 1] = round(right * 32767.0)
                     .toInt()
                     .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                     .toShort()
             }
+            snapshot
         }
+
+        pendingSnapshot?.let { _beatSnapshot.value = it }
     }
 
-    private fun softLimitBus(x: Double, knee: Double, ceiling: Double): Double {
-        val absX = abs(x)
-        if (absX <= knee) return x
-        val headroom = ceiling - knee
-        val compressed = knee + headroom * tanh((absX - knee) / headroom)
-        return if (x >= 0.0) compressed else -compressed
-    }
-
-    private fun triggerBeatBoundary(isFirstStart: Boolean) {
+    private fun triggerBeatBoundary(): MetronomeBeatSnapshot {
         val ts = timeSignature
         val mix = subdivisionMix
         val isMuted = alternateMuteBar && (barCounter % 2 == 1)
@@ -432,7 +618,7 @@ class HarmonyAudioEngine {
             }
         }
 
-        _beatSnapshot.value = MetronomeBeatSnapshot(
+        return MetronomeBeatSnapshot(
             beatIndex = currentBeatInBar,
             totalBeats = ts.beatsPerMeasure,
             isMutedBar = isMuted,
@@ -445,75 +631,111 @@ class HarmonyAudioEngine {
         val slot = percPool[percPoolCursor]
         percPoolCursor = (percPoolCursor + 1) % percPool.size
 
+        val sr = activeSampleRate.toDouble()
         val sound = metronomeSound
-        val (fStart, fEnd, durSamples, accentFlag) = when (sound) {
-            MetronomeSound.WOODBLOCK -> when (kind) {
-                HitKind.ACCENT -> Quad(1280.0, 960.0, 1400, true)
-                HitKind.QUARTER -> Quad(880.0, 680.0, 1200, false)
-                HitKind.SECONDARY_COMPOUND -> Quad(760.0, 580.0, 950, false)
-                HitKind.EIGHTH -> Quad(1040.0, 820.0, 850, false)
-                HitKind.TRIPLET -> Quad(960.0, 760.0, 750, false)
-                HitKind.SIXTEENTH -> Quad(1140.0, 900.0, 650, false)
+        val accentFlag = kind == HitKind.ACCENT
+        var fStart = 1480.0
+        var fEnd = 1180.0
+        var durMs = 12.0
+        var hpCutoffHz = 900.0
+
+        // Short, crisp, spectrally elevated transients cut cleanly over ensemble chords while
+        // keeping RMS energy low enough to avoid cochlear masking, Stapedius reflex, and
+        // downstream speaker limiter pumping.
+        when (sound) {
+            MetronomeSound.WOODBLOCK -> {
+                hpCutoffHz = 900.0
+                when (kind) {
+                    HitKind.ACCENT -> { fStart = 1950.0; fEnd = 1520.0; durMs = 14.0 }
+                    HitKind.QUARTER -> { fStart = 1480.0; fEnd = 1180.0; durMs = 12.0 }
+                    HitKind.SECONDARY_COMPOUND -> { fStart = 1320.0; fEnd = 1060.0; durMs = 10.5 }
+                    HitKind.EIGHTH -> { fStart = 1680.0; fEnd = 1360.0; durMs = 9.5 }
+                    HitKind.TRIPLET -> { fStart = 1580.0; fEnd = 1280.0; durMs = 9.0 }
+                    HitKind.SIXTEENTH -> { fStart = 1820.0; fEnd = 1460.0; durMs = 8.0 }
+                }
             }
-            MetronomeSound.CLICK -> when (kind) {
-                HitKind.ACCENT -> Quad(2400.0, 1800.0, 650, true)
-                HitKind.QUARTER -> Quad(1650.0, 1200.0, 520, false)
-                HitKind.SECONDARY_COMPOUND -> Quad(1400.0, 1050.0, 450, false)
-                HitKind.EIGHTH -> Quad(1950.0, 1500.0, 400, false)
-                HitKind.TRIPLET -> Quad(1800.0, 1400.0, 380, false)
-                HitKind.SIXTEENTH -> Quad(2150.0, 1650.0, 340, false)
+            MetronomeSound.CLICK -> {
+                hpCutoffHz = 1400.0
+                when (kind) {
+                    HitKind.ACCENT -> { fStart = 3300.0; fEnd = 2500.0; durMs = 7.0 }
+                    HitKind.QUARTER -> { fStart = 2550.0; fEnd = 1950.0; durMs = 6.0 }
+                    HitKind.SECONDARY_COMPOUND -> { fStart = 2250.0; fEnd = 1750.0; durMs = 5.5 }
+                    HitKind.EIGHTH -> { fStart = 2850.0; fEnd = 2200.0; durMs = 5.0 }
+                    HitKind.TRIPLET -> { fStart = 2700.0; fEnd = 2080.0; durMs = 4.8 }
+                    HitKind.SIXTEENTH -> { fStart = 3050.0; fEnd = 2350.0; durMs = 4.5 }
+                }
             }
-            MetronomeSound.BELL -> when (kind) {
-                HitKind.ACCENT -> Quad(1568.0, 1568.0, 4800, true)
-                HitKind.QUARTER -> Quad(1174.0, 1174.0, 2600, false)
-                HitKind.SECONDARY_COMPOUND -> Quad(988.0, 988.0, 1800, false)
-                HitKind.EIGHTH -> Quad(1318.0, 1318.0, 1400, false)
-                HitKind.TRIPLET -> Quad(1245.0, 1245.0, 1200, false)
-                HitKind.SIXTEENTH -> Quad(1480.0, 1480.0, 1000, false)
+            MetronomeSound.BELL -> {
+                hpCutoffHz = 1200.0
+                when (kind) {
+                    HitKind.ACCENT -> { fStart = 2637.0; fEnd = 2637.0; durMs = 45.0 }
+                    HitKind.QUARTER -> { fStart = 2093.0; fEnd = 2093.0; durMs = 32.0 }
+                    HitKind.SECONDARY_COMPOUND -> { fStart = 1760.0; fEnd = 1760.0; durMs = 26.0 }
+                    HitKind.EIGHTH -> { fStart = 2349.0; fEnd = 2349.0; durMs = 22.0 }
+                    HitKind.TRIPLET -> { fStart = 2217.0; fEnd = 2217.0; durMs = 20.0 }
+                    HitKind.SIXTEENTH -> { fStart = 2489.0; fEnd = 2489.0; durMs = 18.0 }
+                }
             }
-            MetronomeSound.RIMSHOT -> when (kind) {
-                HitKind.ACCENT -> Quad(460.0, 240.0, 1100, true)
-                HitKind.QUARTER -> Quad(380.0, 200.0, 850, false)
-                HitKind.SECONDARY_COMPOUND -> Quad(340.0, 190.0, 700, false)
-                HitKind.EIGHTH -> Quad(540.0, 320.0, 600, false)
-                HitKind.TRIPLET -> Quad(500.0, 300.0, 550, false)
-                HitKind.SIXTEENTH -> Quad(620.0, 380.0, 500, false)
+            MetronomeSound.RIMSHOT -> {
+                hpCutoffHz = 800.0
+                when (kind) {
+                    HitKind.ACCENT -> { fStart = 1150.0; fEnd = 680.0; durMs = 13.5 }
+                    HitKind.QUARTER -> { fStart = 960.0; fEnd = 580.0; durMs = 11.5 }
+                    HitKind.SECONDARY_COMPOUND -> { fStart = 860.0; fEnd = 520.0; durMs = 10.0 }
+                    HitKind.EIGHTH -> { fStart = 1280.0; fEnd = 780.0; durMs = 9.0 }
+                    HitKind.TRIPLET -> { fStart = 1180.0; fEnd = 720.0; durMs = 8.5 }
+                    HitKind.SIXTEENTH -> { fStart = 1380.0; fEnd = 860.0; durMs = 7.5 }
+                }
             }
         }
 
+        val attackSamples = round(0.00025 * sr).toInt().coerceAtLeast(1)
+        val totalSamples = round(durMs * 0.001 * sr).toInt().coerceAtLeast(attackSamples + 8)
+
         slot.active = true
         slot.ageSamples = 0
-        slot.totalSamples = durSamples
+        slot.totalSamples = totalSamples
+        slot.attackSamples = attackSamples
         slot.phase = 0.0
         slot.phaseOver = 0.0
+        slot.prevNoise = 0.0
+        slot.hpPrevIn = 0.0
+        slot.hpPrevOut = 0.0
+        slot.hpAlpha = 1.0 / (1.0 + TWO_PI * hpCutoffHz / sr)
         slot.freqStart = fStart
         slot.freqEnd = fEnd
-        slot.gain = (level * if (accentFlag) 0.72 else 0.56).coerceIn(0.0, 0.9)
+        // Calibrated so high-passed crisp beats sit cleanly near METRO_BUS_KNEE without squashing
+        slot.gain = (level * if (accentFlag) 0.34 else 0.25).coerceIn(0.0, 0.38)
         slot.sound = sound
         slot.isAccent = accentFlag
     }
 
-    private fun synthesizeVoiceSample(v: ActiveVoice, timbre: ToneVoice): Double {
-        val inc = TWO_PI * v.frequencyHz / SAMPLE_RATE
-        v.phase = (v.phase + inc) % TWO_PI
+    private fun synthesizeVoiceSample(v: ActiveVoice, timbre: ToneVoice, sr: Double): Double {
+        val inc = TWO_PI * v.frequencyHz / sr
+        v.phase += inc
+        if (v.phase >= TWO_PI) {
+            v.phase -= TWO_PI
+        }
         v.ageSamples++
 
-        // Envelope update
+        // Sample-rate-independent envelope timing
+        val srScale = 44100.0 / sr
         val attackRate = when (timbre) {
             ToneVoice.STRINGS -> 0.0008
             ToneVoice.WOODWIND -> 0.0022
             ToneVoice.PIANO -> 0.012
             else -> 0.0035
-        }
-        val releaseRate = 0.0025
+        } * srScale
+        val releaseRate = 0.0025 * srScale
 
         if (v.releasing) {
             v.env = (v.env - releaseRate).coerceAtLeast(0.0)
         } else if (timbre == ToneVoice.PIANO) {
-            if (v.ageSamples < 140) {
+            val pianoAttackSamples = round(0.0032 * sr).toLong().coerceAtLeast(1L)
+            if (v.ageSamples < pianoAttackSamples) {
                 v.env = (v.env + attackRate).coerceAtMost(1.0)
             } else {
-                v.env *= 0.99992
+                v.env *= exp(-3.53 / sr)
             }
         } else {
             v.env = (v.env + attackRate).coerceAtMost(1.0)
@@ -530,7 +752,7 @@ class HarmonyAudioEngine {
                     0.05 * sin(6.0 * p)
             }
             ToneVoice.BRASS -> {
-                val ageSec = v.ageSamples.toDouble() / SAMPLE_RATE
+                val ageSec = v.ageSamples.toDouble() / sr
                 val bloom = (ageSec / 0.11).coerceIn(0.25, 1.0)
                 0.52 * sin(p) +
                     0.30 * bloom * sin(2.0 * p) +
@@ -545,15 +767,18 @@ class HarmonyAudioEngine {
                     0.03 * sin(7.0 * p)
             }
             ToneVoice.STRINGS -> {
-                val detuneInc = TWO_PI * (v.frequencyHz * 1.0028) / SAMPLE_RATE
-                v.phaseDetune = (v.phaseDetune + detuneInc) % TWO_PI
+                val detuneInc = TWO_PI * (v.frequencyHz * 1.0028) / sr
+                v.phaseDetune += detuneInc
+                if (v.phaseDetune >= TWO_PI) {
+                    v.phaseDetune -= TWO_PI
+                }
                 val p2 = v.phaseDetune
                 val osc1 = 0.52 * sin(p) + 0.24 * sin(2.0 * p) + 0.12 * sin(3.0 * p) + 0.06 * sin(4.0 * p)
                 val osc2 = 0.52 * sin(p2) + 0.24 * sin(2.0 * p2) + 0.12 * sin(3.0 * p2) + 0.06 * sin(4.0 * p2)
                 0.55 * (osc1 + osc2)
             }
             ToneVoice.PIANO -> {
-                val ageSec = v.ageSamples.toDouble() / SAMPLE_RATE
+                val ageSec = v.ageSamples.toDouble() / sr
                 val overDecay = exp(-ageSec * 3.8)
                 0.64 * sin(p) +
                     0.28 * overDecay * sin(2.0 * p) +
@@ -563,46 +788,65 @@ class HarmonyAudioEngine {
         }
     }
 
-    private fun synthesizePercussionSample(p: PercussionVoice): Double {
+    private fun synthesizePercussionSample(p: PercussionVoice, sr: Double): Double {
         if (p.ageSamples >= p.totalSamples) {
             p.active = false
             return 0.0
         }
         val t = p.ageSamples.toDouble() / p.totalSamples.toDouble()
         val freq = p.freqStart + (p.freqEnd - p.freqStart) * t
-        p.phase = (p.phase + TWO_PI * freq / SAMPLE_RATE) % TWO_PI
+        p.phase += TWO_PI * freq / sr
+        if (p.phase >= TWO_PI) {
+            p.phase -= TWO_PI
+        }
 
-        val env = exp(-t * when (p.sound) {
-            MetronomeSound.BELL -> 4.5
-            MetronomeSound.CLICK -> 6.5
-            else -> 5.5
-        })
+        // Crisp 0.25 ms attack ramp and smooth tail fade-out eliminate DC step thumps
+        val attack = if (p.ageSamples < p.attackSamples) {
+            p.ageSamples.toDouble() / p.attackSamples.toDouble()
+        } else {
+            1.0
+        }
+        val fadeOut = if (t < 0.88) 1.0 else ((1.0 - t) / 0.12).coerceAtLeast(0.0)
 
-        val wave = when (p.sound) {
+        val decayRate = when (p.sound) {
+            MetronomeSound.BELL -> 6.5
+            MetronomeSound.CLICK -> 8.5
+            MetronomeSound.RIMSHOT -> 8.0
+            MetronomeSound.WOODBLOCK -> 7.5
+        }
+        val env = exp(-t * decayRate) * attack * fadeOut
+
+        val rawWave = when (p.sound) {
             MetronomeSound.WOODBLOCK -> {
-                sin(p.phase) + 0.35 * sin(2.42 * p.phase) * exp(-t * 9.0)
+                0.78 * sin(p.phase) + 0.22 * sin(2.42 * p.phase) * exp(-t * 10.0)
             }
             MetronomeSound.CLICK -> {
-                sin(p.phase) + 0.25 * sin(2.0 * p.phase)
+                0.80 * sin(p.phase) + 0.20 * sin(2.0 * p.phase)
             }
             MetronomeSound.BELL -> {
-                p.phaseOver = (p.phaseOver + TWO_PI * (freq * 2.756) / SAMPLE_RATE) % TWO_PI
-                0.68 * sin(p.phase) + 0.32 * sin(p.phaseOver) * exp(-t * 6.0)
+                p.phaseOver += TWO_PI * (freq * 2.756) / sr
+                if (p.phaseOver >= TWO_PI) {
+                    p.phaseOver -= TWO_PI
+                }
+                0.72 * sin(p.phase) + 0.28 * sin(p.phaseOver) * exp(-t * 8.0)
             }
             MetronomeSound.RIMSHOT -> {
-                val noise = (Random.nextDouble() * 2.0 - 1.0) * exp(-t * 14.0)
-                0.65 * sin(p.phase) + 0.45 * noise
+                val rawNoise = Random.nextDouble() * 2.0 - 1.0
+                val hpNoise = (rawNoise - p.prevNoise) * 0.5 * exp(-t * 12.0)
+                p.prevNoise = rawNoise
+                0.62 * sin(p.phase) + 0.38 * hpNoise
             }
         }
 
-        p.ageSamples++
-        return wave * env * p.gain
-    }
+        val shaped = rawWave * env * p.gain
 
-    private data class Quad(
-        val fStart: Double,
-        val fEnd: Double,
-        val durSamples: Int,
-        val isAccent: Boolean
-    )
+        // 1-pole high-pass filter strips DC and low-mid energy so the click floats cleanly
+        // above sustained harmony chords without cochlear masking or speaker excursion.
+        val filtered = p.hpAlpha * (p.hpPrevOut + shaped - p.hpPrevIn)
+        p.hpPrevIn = shaped
+        p.hpPrevOut = filtered
+
+        p.ageSamples++
+        return filtered
+    }
 }
