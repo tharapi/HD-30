@@ -61,7 +61,7 @@ fun AppNavigation() {
                     }
                     ConsoleViewModel(
                         repository = LocalFallbackPresetRepository(app.applicationContext),
-                        audioEngine = HarmonyAudioEngine(),
+                        audioEngine = HarmonyAudioEngine(app.applicationContext),
                         currentUserId = "local_conductor",
                         midiController = MidiInputController(app.applicationContext)
                     )
@@ -97,7 +97,7 @@ fun AppNavigation() {
                         val db = RehearsalPresetRepository.resolveFirestoreInstance(app.applicationContext)
                         ConsoleViewModel(
                             repository = RehearsalPresetRepository(db = db, auth = auth),
-                            audioEngine = HarmonyAudioEngine(),
+                            audioEngine = HarmonyAudioEngine(app.applicationContext),
                             currentUserId = uid,
                             midiController = MidiInputController(app.applicationContext)
                         )

@@ -1,14 +1,17 @@
 package com.example
 
 import com.example.audio.HarmonyAudioEngine
+import com.example.audio.WavSampleDecoder
 import com.example.model.AudioOutputMode
 import com.example.model.MetronomeSound
 import com.example.model.SubdivisionMix
 import com.example.model.TimeSignature
 import com.example.model.ToneVoice
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -294,6 +297,89 @@ class HarmonyAudioEngineTest {
                 "Expected crisp transient decay within 18 ms for $sound (tailMax=$tailMax, peak=$peak)",
                 tailMax <= peak * 0.01 + 2
             )
+        }
+    }
+
+    @Test
+    fun bundledMetronomeWavsDecodeAndMixLinearlyWithoutClipping() {
+        val rawDir = listOf(File("src/main/res/raw"), File("app/src/main/res/raw"))
+            .firstOrNull { it.isDirectory }
+            ?: throw AssertionError("Expected res/raw directory to exist")
+
+        val fileMap = mapOf(
+            MetronomeSound.WOODBLOCK to "metro_woodblock.wav",
+            MetronomeSound.CLICK to "metro_click.wav",
+            MetronomeSound.BELL to "metro_bell.wav",
+            MetronomeSound.RIMSHOT to "metro_rimshot.wav"
+        )
+        val decodedBank = fileMap.mapValues { (sound, fileName) ->
+            val wavFile = File(rawDir, fileName)
+            assertTrue("Expected bundled WAV to exist: ${wavFile.path}", wavFile.isFile)
+            val decoded = WavSampleDecoder.decode(wavFile.readBytes())
+            assertNotNull("Expected WAV to decode cleanly for $sound", decoded)
+            assertEquals("Expected 48 kHz sample rate for $sound", HarmonyAudioEngine.SAMPLE_RATE, decoded!!.sampleRate)
+            assertTrue("Expected non-empty PCM for $sound", decoded.pcm.isNotEmpty())
+            decoded
+        }
+
+        val denseMix = SubdivisionMix(accent = 1.0f, quarter = 0.85f, eighth = 0.6f, triplet = 0.0f, sixteenth = 0.5f)
+        for (sound in MetronomeSound.entries) {
+            val singleHitEngine = HarmonyAudioEngine().apply {
+                setMetronomeSamples(decodedBank)
+                setMetronomeGain(0.75f)
+                setMetronomeConfig(
+                    bpm = 60,
+                    timeSignature = TimeSignature.FOUR_FOUR,
+                    sound = sound,
+                    mix = SubdivisionMix(accent = 1.0f, quarter = 0.0f, eighth = 0.0f, triplet = 0.0f, sixteenth = 0.0f),
+                    alternateMuteBar = false
+                )
+                setMetronomePlaying(true)
+            }
+            // Render ~256 ms (24 frames = 12288 samples) covering the full acoustic hit + silence tail
+            val hitPcm = renderStereo(singleHitEngine, 24)
+            assertEquals("Expected zero-start transient without DC pop ($sound)", 0, hitPcm.left[0].toInt())
+            val hitPeak = hitPcm.left.maxOf { abs(it.toInt()) }
+            assertTrue("Expected punchy acoustic peak for $sound, got $hitPeak", hitPeak > 9000)
+            assertTrue("Expected unsaturated peak below ceiling for $sound, got $hitPeak", hitPeak < 16400)
+            val tailAfter210Ms = hitPcm.left.copyOfRange(10080, hitPcm.left.size).maxOf { abs(it.toInt()) }
+            assertEquals("Expected complete decay to silence after 210 ms ($sound)", 0, tailAfter210Ms)
+
+            // Verify strictly linear summing with sustained Organ chord (zero cross-modulation)
+            val toneOnly = HarmonyAudioEngine().apply {
+                setToneVoice(ToneVoice.ORGAN)
+                setToneGain(1.0f)
+                updateActiveNotes(mapOf(60 to 261.6256, 64 to 329.6276, 67 to 391.9954))
+            }
+            val metroOnly = HarmonyAudioEngine().apply {
+                setMetronomeSamples(decodedBank)
+                setMetronomeGain(1.0f)
+                setMetronomeConfig(140, TimeSignature.FOUR_FOUR, sound, denseMix, false)
+                setMetronomePlaying(true)
+            }
+            val both = HarmonyAudioEngine().apply {
+                setMetronomeSamples(decodedBank)
+                setToneVoice(ToneVoice.ORGAN)
+                setToneGain(1.0f)
+                setMetronomeGain(1.0f)
+                updateActiveNotes(mapOf(60 to 261.6256, 64 to 329.6276, 67 to 391.9954))
+                setMetronomeConfig(140, TimeSignature.FOUR_FOUR, sound, denseMix, false)
+                setMetronomePlaying(true)
+            }
+            val pcmTone = renderStereo(toneOnly, 60)
+            val pcmMetro = renderStereo(metroOnly, 60)
+            val pcmBoth = renderStereo(both, 60)
+
+            var maxDiff = 0
+            for (i in pcmBoth.left.indices) {
+                val dL = abs(pcmBoth.left[i].toInt() - (pcmTone.left[i].toInt() + pcmMetro.left[i].toInt()))
+                val dR = abs(pcmBoth.right[i].toInt() - (pcmTone.right[i].toInt() + pcmMetro.right[i].toInt()))
+                if (dL > maxDiff) maxDiff = dL
+                if (dR > maxDiff) maxDiff = dR
+            }
+            assertTrue("Expected strictly linear summing (<=2 LSB) for WAV $sound, got $maxDiff", maxDiff <= 2)
+            val combinedPeak = maxOf(pcmBoth.left.maxOf { abs(it.toInt()) }, pcmBoth.right.maxOf { abs(it.toInt()) })
+            assertTrue("Expected clip-free combined peak <= 25400 for WAV $sound, got $combinedPeak", combinedPeak <= 25400)
         }
     }
 }

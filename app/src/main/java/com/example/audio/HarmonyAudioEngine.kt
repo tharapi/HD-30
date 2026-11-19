@@ -1,11 +1,13 @@
 package com.example.audio
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Process
+import com.example.R
 import com.example.model.AudioOutputMode
 import com.example.model.MetronomeSound
 import com.example.model.SubdivisionMix
@@ -52,6 +54,9 @@ private class ActiveVoice(
 
 private class PercussionVoice(
     var active: Boolean = false,
+    var sampleData: FloatArray? = null,
+    var samplePos: Double = 0.0,
+    var sampleStep: Double = 1.0,
     var ageSamples: Int = 0,
     var totalSamples: Int = 0,
     var attackSamples: Int = 12,
@@ -68,7 +73,7 @@ private class PercussionVoice(
     var isAccent: Boolean = false
 )
 
-class HarmonyAudioEngine {
+class HarmonyAudioEngine(context: Context? = null) {
     companion object {
         // Default 48 kHz matches Android AudioFlinger native output on 3.5mm & Bluetooth A2DP,
         // avoiding resampling and inter-sample peaks.
@@ -79,8 +84,8 @@ class HarmonyAudioEngine {
         // Dedicated per-bus headroom budgets for strictly linear summing without digital clipping:
         // |toneLimited| <= 0.27 (-11.4 dBFS) and |metroLimited| <= 0.50 (-6.0 dBFS)
         // => worst-case mixed peak <= 0.77 (-2.27 dBFS), keeping sustained Harmony well below
-        // downstream limiter thresholds while giving short, high-passed metronome clicks 2.5x
-        // stronger transient punch (+8 dB) to cut clearly through ensemble rehearsals.
+        // downstream limiter thresholds while giving metronome transients strong punch (+8 dB)
+        // to cut clearly through ensemble rehearsals.
         private const val BASE_VOICE_NORM = 0.22
         private const val TONE_BUS_KNEE = 0.23
         private const val TONE_BUS_CEILING = 0.27
@@ -99,6 +104,37 @@ class HarmonyAudioEngine {
             val shaped = knee + headroom * tanh(excess)
             return if (sample >= 0.0) shaped else -shaped
         }
+
+        private fun loadBundledMetronomeSamples(context: Context): Map<MetronomeSound, DecodedWavSample> {
+            // Bundled acoustic percussion samples from VSCO 2 Community Edition (CC0-1.0),
+            // pre-trimmed to onset, gently high-passed, resampled to 48 kHz mono, and peak-matched:
+            //   WOODBLOCK -> wood_click_ff_2.wav
+            //   CLICK     -> snare3_click_1.wav
+            //   BELL      -> Cowbell1_Hit_v3_rr1_Sum.wav
+            //   RIMSHOT   -> snare3_rimshot_ff_1.wav
+            val resMap = mapOf(
+                MetronomeSound.WOODBLOCK to R.raw.metro_woodblock,
+                MetronomeSound.CLICK to R.raw.metro_click,
+                MetronomeSound.BELL to R.raw.metro_bell,
+                MetronomeSound.RIMSHOT to R.raw.metro_rimshot
+            )
+            val loaded = HashMap<MetronomeSound, DecodedWavSample>(resMap.size)
+            val resources = context.resources
+            for ((sound, resId) in resMap) {
+                try {
+                    resources.openRawResource(resId).use { stream ->
+                        WavSampleDecoder.decode(stream)?.let { decoded ->
+                            if (decoded.pcm.isNotEmpty()) {
+                                loaded[sound] = decoded
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                    // Fall back cleanly to synthesized percussion if resource loading fails
+                }
+            }
+            return loaded
+        }
     }
 
     private val engineLock = Any()
@@ -106,6 +142,10 @@ class HarmonyAudioEngine {
     @Volatile private var engineRunning: Boolean = false
     private var renderThread: Thread? = null
     @Volatile internal var activeSampleRate: Int = SAMPLE_RATE
+
+    // Bundled acoustic metronome sample bank (immutable map swapped atomically)
+    @Volatile private var metronomeSamples: Map<MetronomeSound, DecodedWavSample> =
+        if (context != null) loadBundledMetronomeSamples(context.applicationContext ?: context) else emptyMap()
 
     // Polyphonic synth state
     private val voices = mutableListOf<ActiveVoice>()
@@ -145,6 +185,10 @@ class HarmonyAudioEngine {
 
     private val _beatSnapshot = MutableStateFlow(MetronomeBeatSnapshot())
     val beatSnapshot: StateFlow<MetronomeBeatSnapshot> = _beatSnapshot.asStateFlow()
+
+    internal fun setMetronomeSamples(samples: Map<MetronomeSound, DecodedWavSample>) {
+        metronomeSamples = samples.toMap()
+    }
 
     fun startEngine() {
         synchronized(engineLock) {
@@ -634,6 +678,29 @@ class HarmonyAudioEngine {
         val sr = activeSampleRate.toDouble()
         val sound = metronomeSound
         val accentFlag = kind == HitKind.ACCENT
+
+        val bundledSample = metronomeSamples[sound]
+        if (bundledSample != null && bundledSample.pcm.isNotEmpty()) {
+            val pitchRatio = when (kind) {
+                HitKind.ACCENT -> 1.22
+                HitKind.QUARTER -> 1.00
+                HitKind.SECONDARY_COMPOUND -> 0.90
+                HitKind.EIGHTH -> 1.12
+                HitKind.TRIPLET -> 1.06
+                HitKind.SIXTEENTH -> 1.18
+            }
+            slot.active = true
+            slot.sampleData = bundledSample.pcm
+            slot.samplePos = 0.0
+            slot.sampleStep = (bundledSample.sampleRate.toDouble() / sr) * pitchRatio
+            // Pre-normalized (-0.5 dBFS) acoustic samples calibrated to sit cleanly near
+            // METRO_BUS_KNEE (0.40) at default 75% volume without squashing.
+            slot.gain = (level * if (accentFlag) 0.56 else 0.40).coerceIn(0.0, 0.62)
+            slot.sound = sound
+            slot.isAccent = accentFlag
+            return
+        }
+
         var fStart = 1480.0
         var fEnd = 1180.0
         var durMs = 12.0
@@ -693,6 +760,7 @@ class HarmonyAudioEngine {
         val totalSamples = round(durMs * 0.001 * sr).toInt().coerceAtLeast(attackSamples + 8)
 
         slot.active = true
+        slot.sampleData = null
         slot.ageSamples = 0
         slot.totalSamples = totalSamples
         slot.attackSamples = attackSamples
@@ -790,6 +858,22 @@ class HarmonyAudioEngine {
     }
 
     private fun synthesizePercussionSample(p: PercussionVoice, sr: Double): Double {
+        val data = p.sampleData
+        if (data != null) {
+            val idx = p.samplePos.toInt()
+            if (idx >= data.size) {
+                p.active = false
+                p.sampleData = null
+                return 0.0
+            }
+            val frac = p.samplePos - idx
+            val s0 = data[idx].toDouble()
+            val s1 = if (idx + 1 < data.size) data[idx + 1].toDouble() else 0.0
+            val interpolated = s0 + (s1 - s0) * frac
+            p.samplePos += p.sampleStep
+            return interpolated * p.gain
+        }
+
         if (p.ageSamples >= p.totalSamples) {
             p.active = false
             return 0.0
