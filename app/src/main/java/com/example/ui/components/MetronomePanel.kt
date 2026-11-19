@@ -59,7 +59,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.audio.MetronomeBeatSnapshot
 import com.example.model.MetronomeSound
 import com.example.model.SubdivisionMix
 import com.example.model.TimeSignature
@@ -77,12 +79,14 @@ import com.example.ui.theme.PitchEmerald
 import com.example.ui.theme.StudioCharcoal
 import com.example.ui.theme.WarmAmber
 import com.example.ui.theme.WarmAmberContainer
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.cos
 import kotlin.math.sin
 
 @Composable
 fun MetronomePanel(
     state: MetronomeUiState,
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
     onTogglePlay: () -> Unit,
     onBpmChanged: (Int) -> Unit,
     onAdjustBpm: (Int) -> Unit,
@@ -90,6 +94,7 @@ fun MetronomePanel(
     onTimeSignatureSelected: (TimeSignature) -> Unit,
     onMetronomeSoundSelected: (MetronomeSound) -> Unit,
     onSubdivisionMixChanged: ((SubdivisionMix) -> SubdivisionMix) -> Unit,
+    onMetronomeGainChanged: (Float) -> Unit,
     onToggleMuteBar: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -108,8 +113,7 @@ fun MetronomePanel(
                     // Conductor Pendulum Visual
                     ConductorPendulumGauge(
                         isPlaying = state.isPlaying,
-                        beatIndex = state.beatSnapshot.beatIndex,
-                        isMutedBar = state.beatSnapshot.isMutedBar,
+                        beatSnapshotFlow = beatSnapshotFlow,
                         modifier = Modifier.size(92.dp)
                     )
 
@@ -138,13 +142,10 @@ fun MetronomePanel(
                             style = MaterialTheme.typography.bodyMedium,
                             color = WarmAmber
                         )
-                        if (state.isPlaying && state.beatSnapshot.isMutedBar) {
-                            Text(
-                                text = "SILENT DRILL BAR",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = WarmAmber
-                            )
-                        }
+                        SilentDrillBarLabel(
+                            isPlaying = state.isPlaying,
+                            beatSnapshotFlow = beatSnapshotFlow
+                        )
                     }
 
                     // Primary Start/Stop + Tap Tempo column
@@ -411,6 +412,37 @@ fun MetronomePanel(
                     )
                 }
 
+                // Master Metronome Volume (independent of sustained tone bus)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "METRO VOL",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MutedSlateText
+                    )
+                    Slider(
+                        value = state.metronomeGain,
+                        onValueChange = onMetronomeGainChanged,
+                        valueRange = 0f..1f,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("metronome_volume_slider"),
+                        colors = SliderDefaults.colors(
+                            thumbColor = WarmAmber,
+                            activeTrackColor = WarmAmber,
+                            inactiveTrackColor = ConsoleSurfaceBright
+                        )
+                    )
+                    Text(
+                        text = "${(state.metronomeGain * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = WarmAmber
+                    )
+                }
+
                 // 5 Hardware Vertical Faders
                 Row(
                     modifier = Modifier
@@ -475,12 +507,29 @@ fun MetronomePanel(
 }
 
 @Composable
+private fun SilentDrillBarLabel(
+    isPlaying: Boolean,
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>
+) {
+    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
+    if (isPlaying && beatSnap.isMutedBar) {
+        Text(
+            text = "SILENT DRILL BAR",
+            style = MaterialTheme.typography.labelSmall,
+            color = WarmAmber
+        )
+    }
+}
+
+@Composable
 private fun ConductorPendulumGauge(
     isPlaying: Boolean,
-    beatIndex: Int,
-    isMutedBar: Boolean,
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
     modifier: Modifier = Modifier
 ) {
+    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
+    val beatIndex = beatSnap.beatIndex
+    val isMutedBar = beatSnap.isMutedBar
     val targetAngle = if (!isPlaying) 0f else if (beatIndex % 2 == 0) -34f else 34f
     val angle by animateFloatAsState(
         targetValue = targetAngle,

@@ -188,6 +188,7 @@ fun HarmonyDirectorScreen(
                         ConsoleLcdHeader(
                             harmonyState = harmonyState,
                             metronomeState = metronomeState,
+                            beatSnapshotFlow = viewModel.beatSnapshot,
                             onStopAllSound = viewModel::stopAllSound,
                             onSignOut = onSignOut
                         )
@@ -200,6 +201,7 @@ fun HarmonyDirectorScreen(
                                 ) {
                                     MetronomePanel(
                                         state = metronomeState,
+                                        beatSnapshotFlow = viewModel.beatSnapshot,
                                         onTogglePlay = viewModel::toggleMetronomePlaying,
                                         onBpmChanged = viewModel::setBpm,
                                         onAdjustBpm = viewModel::adjustBpm,
@@ -207,6 +209,7 @@ fun HarmonyDirectorScreen(
                                         onTimeSignatureSelected = viewModel::selectTimeSignature,
                                         onMetronomeSoundSelected = viewModel::selectMetronomeSound,
                                         onSubdivisionMixChanged = viewModel::updateSubdivisionMix,
+                                        onMetronomeGainChanged = viewModel::setMetronomeGain,
                                         onToggleMuteBar = viewModel::toggleAlternateMuteBar,
                                         modifier = Modifier
                                             .weight(1f)
@@ -264,6 +267,7 @@ fun HarmonyDirectorScreen(
                     ConsoleLcdHeader(
                         harmonyState = harmonyState,
                         metronomeState = metronomeState,
+                        beatSnapshotFlow = viewModel.beatSnapshot,
                         onStopAllSound = viewModel::stopAllSound,
                         onSignOut = onSignOut
                     )
@@ -288,6 +292,7 @@ fun HarmonyDirectorScreen(
                             )
                             ConsoleTab.METRONOME -> MetronomePanel(
                                 state = metronomeState,
+                                beatSnapshotFlow = viewModel.beatSnapshot,
                                 onTogglePlay = viewModel::toggleMetronomePlaying,
                                 onBpmChanged = viewModel::setBpm,
                                 onAdjustBpm = viewModel::adjustBpm,
@@ -295,6 +300,7 @@ fun HarmonyDirectorScreen(
                                 onTimeSignatureSelected = viewModel::selectTimeSignature,
                                 onMetronomeSoundSelected = viewModel::selectMetronomeSound,
                                 onSubdivisionMixChanged = viewModel::updateSubdivisionMix,
+                                onMetronomeGainChanged = viewModel::setMetronomeGain,
                                 onToggleMuteBar = viewModel::toggleAlternateMuteBar
                             )
                             ConsoleTab.PRESETS -> PresetsPanel(

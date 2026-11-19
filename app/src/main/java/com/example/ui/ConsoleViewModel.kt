@@ -24,7 +24,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -59,7 +58,7 @@ data class MetronomeUiState(
     val metronomeSound: MetronomeSound = MetronomeSound.WOODBLOCK,
     val subdivisionMix: SubdivisionMix = SubdivisionMix(),
     val alternateMuteBar: Boolean = false,
-    val beatSnapshot: MetronomeBeatSnapshot = MetronomeBeatSnapshot()
+    val metronomeGain: Float = 0.75f
 )
 
 class ConsoleViewModel(
@@ -72,16 +71,9 @@ class ConsoleViewModel(
     val harmonyState: StateFlow<HarmonyUiState> = _harmonyState.asStateFlow()
 
     private val _metronomeConfig = MutableStateFlow(MetronomeUiState())
-    val metronomeState: StateFlow<MetronomeUiState> = combine(
-        _metronomeConfig,
-        audioEngine.beatSnapshot
-    ) { config, snapshot ->
-        config.copy(beatSnapshot = snapshot)
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000L),
-        initialValue = MetronomeUiState()
-    )
+    val metronomeState: StateFlow<MetronomeUiState> = _metronomeConfig.asStateFlow()
+
+    val beatSnapshot: StateFlow<MetronomeBeatSnapshot> = audioEngine.beatSnapshot
 
     val presetsState: StateFlow<UiState<List<RehearsalPreset>>> =
         repository.observePresets(currentUserId)
@@ -275,6 +267,12 @@ class ConsoleViewModel(
         pushMetronomeAudioConfig()
     }
 
+    fun setMetronomeGain(gain: Float) {
+        val clamped = gain.coerceIn(0f, 1f)
+        _metronomeConfig.update { it.copy(metronomeGain = clamped) }
+        audioEngine.setMetronomeGain(clamped)
+    }
+
     fun stopAllSound() {
         _harmonyState.update {
             it.copy(
@@ -444,8 +442,10 @@ class ConsoleViewModel(
 
     private fun pushAudioConfig() {
         val h = _harmonyState.value
+        val m = _metronomeConfig.value
         audioEngine.setToneVoice(h.voice)
         audioEngine.setToneGain(h.toneGain)
+        audioEngine.setMetronomeGain(m.metronomeGain)
         pushMetronomeAudioConfig()
     }
 

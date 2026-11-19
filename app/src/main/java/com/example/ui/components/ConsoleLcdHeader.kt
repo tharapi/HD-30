@@ -39,7 +39,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.audio.MetronomeBeatSnapshot
 import com.example.model.PitchTheory
 import com.example.model.TemperamentMode
 import com.example.ui.HarmonyUiState
@@ -53,17 +55,18 @@ import com.example.ui.theme.MutedSlateText
 import com.example.ui.theme.PitchEmerald
 import com.example.ui.theme.StudioCharcoal
 import com.example.ui.theme.WarmAmber
+import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
 
 @Composable
 fun ConsoleLcdHeader(
     harmonyState: HarmonyUiState,
     metronomeState: MetronomeUiState,
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
     onStopAllSound: () -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val beatSnap = metronomeState.beatSnapshot
     val hasActiveSound = harmonyState.activeWrittenMidis.isNotEmpty() || metronomeState.isPlaying
 
     Surface(
@@ -100,35 +103,7 @@ fun ConsoleLcdHeader(
                         )
                     }
 
-                    // Beat LED Strip (caps visually at 12 LEDs cleanly)
-                    val ledDesc = stringResource(R.string.cd_beat_led)
-                    Row(
-                        modifier = Modifier.semantics { contentDescription = ledDesc },
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val total = beatSnap.totalBeats.coerceIn(2, 12)
-                        for (b in 0 until total) {
-                            val isCurrent = beatSnap.isPlaying && beatSnap.beatIndex == b
-                            val targetColor = when {
-                                !isCurrent -> ConsoleSurface
-                                beatSnap.isMutedBar -> WarmAmber.copy(alpha = 0.7f)
-                                b == 0 -> DownbeatCrimson
-                                else -> PitchEmerald
-                            }
-                            val ledColor by animateColorAsState(
-                                targetValue = targetColor,
-                                animationSpec = tween(durationMillis = 70),
-                                label = "beat_led_$b"
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .size(if (b == 0) 11.dp else 8.dp)
-                                    .clip(CircleShape)
-                                    .background(ledColor)
-                            )
-                        }
-                    }
+                    BeatLedStrip(beatSnapshotFlow = beatSnapshotFlow)
                 }
 
                 Row(
@@ -248,6 +223,43 @@ fun ConsoleLcdHeader(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun BeatLedStrip(
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>
+) {
+    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
+    val ledDesc = stringResource(R.string.cd_beat_led)
+
+    // Beat LED Strip (caps visually at 12 LEDs cleanly)
+    Row(
+        modifier = Modifier.semantics { contentDescription = ledDesc },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val total = beatSnap.totalBeats.coerceIn(2, 12)
+        for (b in 0 until total) {
+            val isCurrent = beatSnap.isPlaying && beatSnap.beatIndex == b
+            val targetColor = when {
+                !isCurrent -> ConsoleSurface
+                beatSnap.isMutedBar -> WarmAmber.copy(alpha = 0.7f)
+                b == 0 -> DownbeatCrimson
+                else -> PitchEmerald
+            }
+            val ledColor by animateColorAsState(
+                targetValue = targetColor,
+                animationSpec = tween(durationMillis = 70),
+                label = "beat_led_$b"
+            )
+            Box(
+                modifier = Modifier
+                    .size(if (b == 0) 11.dp else 8.dp)
+                    .clip(CircleShape)
+                    .background(ledColor)
+            )
         }
     }
 }
