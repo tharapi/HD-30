@@ -16,20 +16,45 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
+interface PresetRepository {
+    fun observePresets(userId: String): Flow<List<RehearsalPreset>>
+    suspend fun createPreset(userId: String, preset: RehearsalPreset): Result<Unit>
+    suspend fun updatePreset(userId: String, preset: RehearsalPreset): Result<Unit>
+    suspend fun deletePreset(userId: String, presetId: String): Result<Unit>
+}
+
 class RehearsalPresetRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth
-) {
+) : PresetRepository {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
-            context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        resolveFirestoreInstance(context.applicationContext)
     )
+
+    companion object {
+        fun resolveFirestoreInstance(context: Context): FirebaseFirestore {
+            val resId = context.resources.getIdentifier(
+                "firestore_database_id",
+                "string",
+                context.packageName
+            )
+            val databaseId = if (resId != 0) {
+                runCatching { context.getString(resId) }.getOrNull()?.takeIf { it.isNotBlank() }
+            } else {
+                null
+            }
+            return if (databaseId != null) {
+                FirebaseFirestore.getInstance(databaseId)
+            } else {
+                FirebaseFirestore.getInstance()
+            }
+        }
+    }
 
     private fun presetsCollection(userId: String) =
         db.collection("users").document(userId).collection("rehearsal_presets")
 
-    fun observePresets(userId: String): Flow<List<RehearsalPreset>> =
+    override fun observePresets(userId: String): Flow<List<RehearsalPreset>> =
         presetsCollection(userId)
             .orderBy("updatedAt", Query.Direction.DESCENDING)
             .snapshots()
@@ -40,7 +65,7 @@ class RehearsalPresetRepository(
                 )
             }
 
-    suspend fun createPreset(userId: String, preset: RehearsalPreset): Result<Unit> {
+    override suspend fun createPreset(userId: String, preset: RehearsalPreset): Result<Unit> {
         val trimmedTitle = preset.title.trim()
         val trimmedNotes = preset.notes.trim()
         val docPath = "users/$userId/rehearsal_presets"
@@ -88,7 +113,7 @@ class RehearsalPresetRepository(
         }
     }
 
-    suspend fun updatePreset(userId: String, preset: RehearsalPreset): Result<Unit> {
+    override suspend fun updatePreset(userId: String, preset: RehearsalPreset): Result<Unit> {
         val trimmedTitle = preset.title.trim()
         val trimmedNotes = preset.notes.trim()
         val presetId = preset.id
@@ -136,7 +161,7 @@ class RehearsalPresetRepository(
         }
     }
 
-    suspend fun deletePreset(userId: String, presetId: String): Result<Unit> {
+    override suspend fun deletePreset(userId: String, presetId: String): Result<Unit> {
         val docPath = "users/$userId/rehearsal_presets/$presetId"
         return try {
             val uid = auth.currentUser?.uid

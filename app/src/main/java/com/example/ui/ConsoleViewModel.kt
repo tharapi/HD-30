@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.HarmonyAudioEngine
 import com.example.audio.MetronomeBeatSnapshot
-import com.example.data.RehearsalPresetRepository
+import com.example.data.PresetRepository
 import com.example.midi.MidiConnectionUiState
 import com.example.midi.MidiHardwareEvent
 import com.example.midi.MidiInputController
@@ -90,7 +90,7 @@ enum class MidiControlTarget(
 }
 
 class ConsoleViewModel(
-    private val repository: RehearsalPresetRepository,
+    private val repository: PresetRepository,
     private val audioEngine: HarmonyAudioEngine,
     private val currentUserId: String,
     private val midiController: MidiInputController? = null,

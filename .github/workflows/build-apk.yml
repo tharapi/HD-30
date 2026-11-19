@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -43,10 +43,17 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare environment and debug signing keystore
+      - name: Prepare environment, Firebase config (optional), and debug keystore
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           if [ ! -f .env ]; then
             cp .env.example .env 2>/dev/null || touch .env
+          fi
+
+          if [ ! -f app/google-services.json ] && [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+            echo "Restored app/google-services.json from GitHub Secret."
           fi
 
           KEYSTORE_READY=0
