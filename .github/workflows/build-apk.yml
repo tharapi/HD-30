@@ -21,23 +21,46 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Accept Android SDK licenses
+      - name: Install Android SDK 36.1 & Build Tools 36.0.0
         run: |
           SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          if [ -n "$SDK_ROOT" ] && [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          echo "Using SDK_ROOT=$SDK_ROOT"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT" -name sdkmanager -type f 2>/dev/null | head -n 1)"
           fi
+          echo "Using SDKMANAGER=$SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
+            "platform-tools" \
+            "build-tools;36.0.0" \
+            "platforms;android-36" \
+            "platforms;android-36.1"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
 
       - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare debug signing keystore
+      - name: Prepare environment and debug signing keystore
         run: |
+          if [ ! -f .env ]; then
+            cp .env.example .env 2>/dev/null || touch .env
+          fi
+
+          KEYSTORE_READY=0
           if [ -f debug.keystore.base64 ]; then
-            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
-          else
+            if tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore 2>/dev/null; then
+              if keytool -list -keystore debug.keystore -storepass android >/dev/null 2>&1; then
+                KEYSTORE_READY=1
+                echo "Decoded project debug.keystore successfully."
+              fi
+            fi
+          fi
+
+          if [ "$KEYSTORE_READY" -ne 1 ]; then
+            rm -f debug.keystore
             keytool -genkeypair -v \
               -keystore debug.keystore \
               -storepass android \
@@ -50,7 +73,19 @@ jobs:
           fi
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --no-daemon --no-configuration-cache --stacktrace 2>&1 | tee gradle-build.log
+
+      - name: Publish failure summary if build failed
+        if: failure()
+        run: |
+          {
+            echo "### Build Debug APK Error Log (last 80 lines)"
+            echo '```text'
+            tail -n 80 gradle-build.log 2>/dev/null || echo "No gradle-build.log found."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Rename APK for easy download
         run: cp app/build/outputs/apk/debug/app-debug.apk Harmony-Director.apk
