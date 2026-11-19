@@ -189,9 +189,9 @@ class HarmonyAudioEngineTest {
         val peakL = pcm.left.maxOf { abs(it.toInt()) }
         val peakR = pcm.right.maxOf { abs(it.toInt()) }
         val peak = maxOf(peakL, peakR)
-        // Worst-case ceiling is (0.27 + 0.20) * 32767 = 15400 (-6.56 dBFS) to avoid triggering
-        // downstream 3.5mm AUX / Bluetooth speaker DSP limiters and AudioFlinger clipping.
-        assertTrue("Expected peak <= 15600 (<-6.4 dBFS safe headroom), got $peak", peak <= 15600)
+        // Worst-case ceiling is (0.27 + 0.50) * 32767 = 25231 (-2.27 dBFS): clip-free strictly
+        // linear summing with 2.5x stronger metronome transient headroom.
+        assertTrue("Expected peak <= 25400 (<-2.2 dBFS clip-free headroom), got $peak", peak <= 25400)
     }
 
     @Test
@@ -284,8 +284,8 @@ class HarmonyAudioEngineTest {
             assertEquals("Expected click to start at zero without DC step ($sound)", 0, pcm.left[0].toInt())
 
             val peak = pcm.left.maxOf { abs(it.toInt()) }
-            assertTrue("Expected audible transient peak for $sound, got $peak", peak > 1500)
-            assertTrue("Expected clean unsaturated peak below ceiling for $sound, got $peak", peak < 6600)
+            assertTrue("Expected audible transient peak for $sound, got $peak", peak > 6000)
+            assertTrue("Expected clean unsaturated peak below ceiling for $sound, got $peak", peak < 16400)
 
             // Verify crisp decay: after 18 ms (864 samples), residual must be silent (< 1% of peak)
             val tailWindowStart = 864

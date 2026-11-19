@@ -76,16 +76,16 @@ class HarmonyAudioEngine {
         const val FRAME_SAMPLES = 512
         private const val TWO_PI = 2.0 * PI
 
-        // Dedicated per-bus headroom budgets for strictly linear summing with generous
-        // downstream safety margin:
-        // |toneLimited| <= 0.27 (-11.4 dBFS) and |metroLimited| <= 0.20 (-14.0 dBFS)
-        // => worst-case mixed peak <= 0.47 (-6.56 dBFS), keeping external 3.5mm AUX / PA /
-        // Bluetooth speaker DSP limiters and Android AudioFlinger comfortably below threshold.
+        // Dedicated per-bus headroom budgets for strictly linear summing without digital clipping:
+        // |toneLimited| <= 0.27 (-11.4 dBFS) and |metroLimited| <= 0.50 (-6.0 dBFS)
+        // => worst-case mixed peak <= 0.77 (-2.27 dBFS), keeping sustained Harmony well below
+        // downstream limiter thresholds while giving short, high-passed metronome clicks 2.5x
+        // stronger transient punch (+8 dB) to cut clearly through ensemble rehearsals.
         private const val BASE_VOICE_NORM = 0.22
         private const val TONE_BUS_KNEE = 0.23
         private const val TONE_BUS_CEILING = 0.27
-        private const val METRO_BUS_KNEE = 0.16
-        private const val METRO_BUS_CEILING = 0.20
+        private const val METRO_BUS_KNEE = 0.40
+        private const val METRO_BUS_CEILING = 0.50
 
         private const val GAIN_SMOOTH_COEFF = 0.005
         private const val POLY_NORM_SMOOTH_COEFF = 0.0015
@@ -704,8 +704,9 @@ class HarmonyAudioEngine {
         slot.hpAlpha = 1.0 / (1.0 + TWO_PI * hpCutoffHz / sr)
         slot.freqStart = fStart
         slot.freqEnd = fEnd
-        // Calibrated so high-passed crisp beats sit cleanly near METRO_BUS_KNEE without squashing
-        slot.gain = (level * if (accentFlag) 0.34 else 0.25).coerceIn(0.0, 0.38)
+        // Calibrated 2.5x stronger so high-passed crisp beats sit cleanly near METRO_BUS_KNEE
+        // without squashing while cutting clearly through sustained Harmony chords.
+        slot.gain = (level * if (accentFlag) 0.85 else 0.625).coerceIn(0.0, 0.95)
         slot.sound = sound
         slot.isAccent = accentFlag
     }
