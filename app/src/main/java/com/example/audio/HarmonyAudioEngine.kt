@@ -141,17 +141,19 @@ class HarmonyAudioEngine(context: Context? = null) {
         }
 
         private fun loadBundledInstrumentBanks(context: Context): Map<ToneVoice, List<InstrumentSampleZone>> {
-            // Bundled orchestral multi-samples from VSCO 2 Community Edition (CC0-1.0),
-            // pitch-calibrated to A4=440 Hz with phase-aligned seamless crossfade loops in 'smpl':
-            //   ORGAN    -> Keys/Organ/Quiet (21 zones, C2..C7)
-            //   BRASS    -> Tuba + French Horn + Trumpet non-vibrato sustain (16 zones, F1..C6)
-            //   WOODWIND -> Bassoon + Clarinet + Flute non-vibrato sustain (18 zones, Bb1..C7)
-            //   PIANO    -> Keys/Upright Nr1 natural decay (14 zones, C1..G7)
-            // PURE_SINE and STRINGS intentionally remain synthesized.
+            // Bundled orchestral multi-samples, pitch-calibrated to A4=440 Hz with phase-aligned
+            // seamless crossfade loops in RIFF 'smpl':
+            //   ORGAN    -> VSCO-2-CE Keys/Organ/Quiet (21 zones, C2..C7)
+            //   BRASS    -> VSCO-2-CE Tuba + French Horn + Trumpet non-vibrato (16 zones, F1..C6)
+            //   WOODWIND -> VSCO-2-CE Bassoon + Clarinet + Flute non-vibrato (18 zones, Bb1..C7)
+            //   STRINGS  -> VSCO-2-CE Contrabass NV + Philharmonia Cello/Viola/Violin non-vibrato (23 zones, E1..A6)
+            //   PIANO    -> VSCO-2-CE Keys/Upright Nr1 natural decay (14 zones, C1..G7)
+            // PURE_SINE intentionally remains pure mathematical synthesis.
             val dirMap = mapOf(
                 ToneVoice.ORGAN to "samples/organ",
                 ToneVoice.BRASS to "samples/brass",
                 ToneVoice.WOODWIND to "samples/woodwind",
+                ToneVoice.STRINGS to "samples/strings",
                 ToneVoice.PIANO to "samples/piano"
             )
             val assets = context.assets
@@ -891,8 +893,16 @@ class HarmonyAudioEngine(context: Context? = null) {
             }
             val activeZone = zone!!
 
-            val attackRate = (if (timbre == ToneVoice.PIANO) 0.015 else 0.005) * srScale
-            val releaseRate = (if (timbre == ToneVoice.PIANO) 0.0018 else 0.0012) * srScale
+            val attackRate = when (timbre) {
+                ToneVoice.PIANO -> 0.015
+                ToneVoice.STRINGS -> 0.0025
+                else -> 0.005
+            } * srScale
+            val releaseRate = when (timbre) {
+                ToneVoice.PIANO -> 0.0018
+                ToneVoice.STRINGS -> 0.0010
+                else -> 0.0012
+            } * srScale
             if (v.releasing) {
                 v.env = (v.env - releaseRate).coerceAtLeast(0.0)
             } else {

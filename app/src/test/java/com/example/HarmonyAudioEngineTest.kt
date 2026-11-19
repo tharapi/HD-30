@@ -393,6 +393,7 @@ class HarmonyAudioEngineTest {
             ToneVoice.ORGAN to "organ",
             ToneVoice.BRASS to "brass",
             ToneVoice.WOODWIND to "woodwind",
+            ToneVoice.STRINGS to "strings",
             ToneVoice.PIANO to "piano"
         )
         val banks = voiceDirs.mapValues { (voice, folderName) ->
