@@ -23,16 +23,7 @@
         },
         "timeSignature": {
           "type": "string",
-          "enum": [
-            "TWO_FOUR",
-            "THREE_FOUR",
-            "FOUR_FOUR",
-            "FIVE_FOUR",
-            "SIX_EIGHT",
-            "NINE_EIGHT",
-            "TWELVE_EIGHT"
-          ],
-          "description": "Selected time signature."
+          "description": "Custom time signature in '<1-16>/<1|2|4|8|16>' format (e.g., '4/4', '7/8', '16/16') or legacy enum name."
         },
         "metronomeSound": {
           "type": "string",

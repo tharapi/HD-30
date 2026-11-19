@@ -27,13 +27,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -45,6 +50,9 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -81,6 +89,7 @@ import com.example.ui.theme.WarmAmber
 import com.example.ui.theme.WarmAmberContainer
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 @Composable
@@ -110,8 +119,8 @@ fun MetronomePanel(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Conductor Pendulum Visual
-                    ConductorPendulumGauge(
+                    // Conductor Pendulum Visual (isolated beat collection to avoid recomposing sliders)
+                    LiveConductorPendulum(
                         isPlaying = state.isPlaying,
                         beatSnapshotFlow = beatSnapshotFlow,
                         modifier = Modifier.size(92.dp)
@@ -142,7 +151,7 @@ fun MetronomePanel(
                             style = MaterialTheme.typography.bodyMedium,
                             color = WarmAmber
                         )
-                        SilentDrillBarLabel(
+                        SilentDrillBarBadge(
                             isPlaying = state.isPlaying,
                             beatSnapshotFlow = beatSnapshotFlow
                         )
@@ -248,6 +257,44 @@ fun MetronomePanel(
                         testTag = "bpm_plus_5"
                     )
                 }
+
+                // Independent Metronome Master Volume Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = "Metronome Volume",
+                        tint = PitchEmerald,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "CLICK VOL",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MutedSlateText
+                    )
+                    Slider(
+                        value = state.metronomeGain,
+                        onValueChange = onMetronomeGainChanged,
+                        valueRange = 0f..1f,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("metronome_volume_slider"),
+                        colors = SliderDefaults.colors(
+                            thumbColor = PitchEmerald,
+                            activeTrackColor = PitchEmerald,
+                            inactiveTrackColor = ConsoleSurfaceBright
+                        )
+                    )
+                    Text(
+                        text = "${(state.metronomeGain * 100f).roundToInt()}%",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = PitchEmerald,
+                        modifier = Modifier.width(38.dp)
+                    )
+                }
             }
         }
 
@@ -259,40 +306,10 @@ fun MetronomePanel(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MutedSlateText
                 )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    TimeSignature.entries.forEach { ts ->
-                        val selected = state.timeSignature == ts
-                        FilterChip(
-                            selected = selected,
-                            onClick = { onTimeSignatureSelected(ts) },
-                            modifier = Modifier
-                                .height(48.dp)
-                                .testTag("meter_${ts.name.lowercase()}"),
-                            label = {
-                                Text(
-                                    text = ts.label,
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                containerColor = ConsoleSurface,
-                                selectedContainerColor = ElectricSkyContainer,
-                                selectedLabelColor = ElectricSky
-                            ),
-                            border = FilterChipDefaults.filterChipBorder(
-                                enabled = true,
-                                selected = selected,
-                                borderColor = HardwareBorder,
-                                selectedBorderColor = ElectricSky
-                            )
-                        )
-                    }
-                }
+                CustomTimeSignatureControl(
+                    timeSignature = state.timeSignature,
+                    onTimeSignatureChanged = onTimeSignatureSelected
+                )
 
                 Text(
                     text = "Metronome Sound",
@@ -412,37 +429,6 @@ fun MetronomePanel(
                     )
                 }
 
-                // Master Metronome Volume (independent of sustained tone bus)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "METRO VOL",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MutedSlateText
-                    )
-                    Slider(
-                        value = state.metronomeGain,
-                        onValueChange = onMetronomeGainChanged,
-                        valueRange = 0f..1f,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("metronome_volume_slider"),
-                        colors = SliderDefaults.colors(
-                            thumbColor = WarmAmber,
-                            activeTrackColor = WarmAmber,
-                            inactiveTrackColor = ConsoleSurfaceBright
-                        )
-                    )
-                    Text(
-                        text = "${(state.metronomeGain * 100).toInt()}%",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = WarmAmber
-                    )
-                }
-
                 // 5 Hardware Vertical Faders
                 Row(
                     modifier = Modifier
@@ -507,7 +493,22 @@ fun MetronomePanel(
 }
 
 @Composable
-private fun SilentDrillBarLabel(
+private fun LiveConductorPendulum(
+    isPlaying: Boolean,
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
+    modifier: Modifier = Modifier
+) {
+    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
+    ConductorPendulumGauge(
+        isPlaying = isPlaying,
+        beatIndex = beatSnap.beatIndex,
+        isMutedBar = beatSnap.isMutedBar,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun SilentDrillBarBadge(
     isPlaying: Boolean,
     beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>
 ) {
@@ -522,14 +523,213 @@ private fun SilentDrillBarLabel(
 }
 
 @Composable
+private fun CustomTimeSignatureControl(
+    timeSignature: TimeSignature,
+    onTimeSignatureChanged: (TimeSignature) -> Unit
+) {
+    var topMenuExpanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Backlit LCD Stacked Fraction Readout
+        Surface(
+            color = LcdMidnight,
+            shape = MaterialTheme.shapes.medium,
+            border = BorderStroke(1.dp, LcdBorder),
+            modifier = Modifier
+                .width(74.dp)
+                .testTag("meter_lcd_display")
+        ) {
+            Column(
+                modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "${timeSignature.numerator}",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = ElectricSky
+                )
+                HorizontalDivider(
+                    modifier = Modifier.width(36.dp),
+                    thickness = 2.dp,
+                    color = LcdBorder
+                )
+                Text(
+                    text = "${timeSignature.denominator}",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = WarmAmber
+                )
+                Text(
+                    text = if (timeSignature.isCompound) "COMP" else "SIMPLE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MutedSlateText
+                )
+            }
+        }
+
+        // Top (1..16) and Locked Bottom (1, 2, 4, 8, 16) Controls
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Top number: 1 - 16
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "TOP · BEATS PER BAR (1–16)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ElectricSky
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SmallStepButton(
+                        label = "-",
+                        onClick = {
+                            onTimeSignatureChanged(
+                                TimeSignature.create(timeSignature.numerator - 1, timeSignature.denominator)
+                            )
+                        },
+                        enabled = timeSignature.numerator > TimeSignature.MIN_NUMERATOR,
+                        testTag = "meter_top_minus"
+                    )
+
+                    Box(modifier = Modifier.weight(1f)) {
+                        OutlinedButton(
+                            onClick = { topMenuExpanded = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("meter_top_picker"),
+                            border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.7f)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = ElectricSkyContainer.copy(alpha = 0.55f),
+                                contentColor = ElectricSky
+                            ),
+                            shape = MaterialTheme.shapes.small,
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text(
+                                text = "${timeSignature.numerator}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Filled.ArrowDropDown,
+                                contentDescription = "Select beats per measure",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = topMenuExpanded,
+                            onDismissRequest = { topMenuExpanded = false },
+                            containerColor = ConsoleSurface
+                        ) {
+                            for (num in TimeSignature.MIN_NUMERATOR..TimeSignature.MAX_NUMERATOR) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = "$num",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = if (num == timeSignature.numerator) ElectricSky else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("meter_top_option_$num"),
+                                    onClick = {
+                                        topMenuExpanded = false
+                                        onTimeSignatureChanged(
+                                            TimeSignature.create(num, timeSignature.denominator)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    SmallStepButton(
+                        label = "+",
+                        onClick = {
+                            onTimeSignatureChanged(
+                                TimeSignature.create(timeSignature.numerator + 1, timeSignature.denominator)
+                            )
+                        },
+                        enabled = timeSignature.numerator < TimeSignature.MAX_NUMERATOR,
+                        testTag = "meter_top_plus"
+                    )
+                }
+            }
+
+            // Bottom number: locked to 1, 2, 4, 8, 16
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "BOTTOM · BEAT UNIT (LOCKED: 1 · 2 · 4 · 8 · 16)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WarmAmber
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    TimeSignature.ALLOWED_DENOMINATORS.forEach { den ->
+                        val selected = timeSignature.denominator == den
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                onTimeSignatureChanged(
+                                    TimeSignature.create(timeSignature.numerator, den)
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("meter_bottom_$den"),
+                            label = {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "$den",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                }
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = ConsoleSurface,
+                                selectedContainerColor = WarmAmberContainer,
+                                selectedLabelColor = WarmAmber
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = selected,
+                                borderColor = HardwareBorder,
+                                selectedBorderColor = WarmAmber
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ConductorPendulumGauge(
     isPlaying: Boolean,
-    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
+    beatIndex: Int,
+    isMutedBar: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
-    val beatIndex = beatSnap.beatIndex
-    val isMutedBar = beatSnap.isMutedBar
     val targetAngle = if (!isPlaying) 0f else if (beatIndex % 2 == 0) -34f else 34f
     val angle by animateFloatAsState(
         targetValue = targetAngle,

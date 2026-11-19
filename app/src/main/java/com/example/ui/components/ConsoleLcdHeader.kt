@@ -8,6 +8,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,9 +20,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.audio.MetronomeBeatSnapshot
+import com.example.midi.MidiConnectionUiState
 import com.example.model.PitchTheory
 import com.example.model.TemperamentMode
 import com.example.ui.HarmonyUiState
@@ -49,6 +52,7 @@ import com.example.ui.MetronomeUiState
 import com.example.ui.theme.ConsoleSurface
 import com.example.ui.theme.DownbeatCrimson
 import com.example.ui.theme.ElectricSky
+import com.example.ui.theme.HardwareBorder
 import com.example.ui.theme.LcdBorder
 import com.example.ui.theme.LcdMidnight
 import com.example.ui.theme.MutedSlateText
@@ -65,9 +69,12 @@ fun ConsoleLcdHeader(
     beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
     onStopAllSound: () -> Unit,
     onSignOut: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    midiState: MidiConnectionUiState = MidiConnectionUiState(),
+    onOpenMidiSettings: () -> Unit = {}
 ) {
     val hasActiveSound = harmonyState.activeWrittenMidis.isNotEmpty() || metronomeState.isPlaying
+    val isMidiConnected = midiState.connectedDeviceName != null
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -80,13 +87,14 @@ fun ConsoleLcdHeader(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Top Telemetry Hardware Strip: Title, Beat LEDs, Panic Stop, Sign Out
+            // Top Telemetry Hardware Strip: Title, Beat LEDs, MIDI Link, Panic Stop, Sign Out
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Row(
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -103,19 +111,59 @@ fun ConsoleLcdHeader(
                         )
                     }
 
-                    BeatLedStrip(beatSnapshotFlow = beatSnapshotFlow)
+                    // Beat LED Strip isolated to recompose only on beat ticks
+                    BeatLedStrip(
+                        beatSnapshotFlow = beatSnapshotFlow,
+                        fallbackTotalBeats = metronomeState.timeSignature.beatsPerMeasure,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
                 }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    val midiCd = stringResource(R.string.cd_midi_status)
+                    FilledTonalButton(
+                        onClick = onOpenMidiSettings,
+                        modifier = Modifier
+                            .height(48.dp)
+                            .semantics { contentDescription = midiCd }
+                            .testTag("midi_status_button"),
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = if (isMidiConnected) {
+                                PitchEmerald.copy(alpha = 0.18f)
+                            } else {
+                                ConsoleSurface
+                            },
+                            contentColor = if (isMidiConnected) PitchEmerald else ElectricSky
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isMidiConnected) PitchEmerald else HardwareBorder
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Cable,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isMidiConnected) "MIDI ON" else "MIDI",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1
+                        )
+                    }
+
                     FilledTonalButton(
                         onClick = onStopAllSound,
                         enabled = hasActiveSound,
                         modifier = Modifier
-                            .height(36.dp)
+                            .height(48.dp)
                             .testTag("panic_stop_button"),
+                        contentPadding = PaddingValues(horizontal = 10.dp),
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = DownbeatCrimson.copy(alpha = 0.22f),
                             contentColor = DownbeatCrimson,
@@ -125,7 +173,7 @@ fun ConsoleLcdHeader(
                         border = if (hasActiveSound) BorderStroke(1.dp, DownbeatCrimson) else null
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.VolumeOff,
+                            imageVector = Icons.AutoMirrored.Filled.VolumeOff,
                             contentDescription = stringResource(R.string.cd_stop_all),
                             modifier = Modifier.size(16.dp)
                         )
@@ -188,78 +236,58 @@ fun ConsoleLcdHeader(
                 )
             }
 
-            // Active Notes & Pure Cent Deviation Readout Strip
-            if (harmonyState.activePitchInfos.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    harmonyState.activePitchInfos.forEach { info ->
-                        val centsText = if (harmonyState.temperament == TemperamentMode.PURE) {
-                            val sign = if (info.centsOffsetFromEt >= 0) "+" else ""
-                            String.format(Locale.US, " %s%.1f¢ (%s)", sign, info.centsOffsetFromEt, info.intervalName)
-                        } else {
-                            String.format(Locale.US, " %.1f Hz", info.frequencyHz)
-                        }
-                        val label = if (info.writtenName == info.soundingName) {
-                            "${info.soundingName}$centsText"
-                        } else {
-                            "${info.writtenName}→${info.soundingName}$centsText"
-                        }
-                        Surface(
-                            color = ConsoleSurface,
-                            shape = MaterialTheme.shapes.extraSmall,
-                            border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.4f))
-                        ) {
-                            Text(
-                                text = label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = ElectricSky,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
+            // Fixed-height Active Notes & Pure Cent Deviation Readout Strip (prevents layout jumping on keypress)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(28.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                if (harmonyState.activePitchInfos.isEmpty()) {
+                    Text(
+                        text = "READY · TAP KEYBOARD TO SOUND REFERENCE TONES",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MutedSlateText.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        harmonyState.activePitchInfos.forEach { info ->
+                            val centsText = if (harmonyState.temperament == TemperamentMode.PURE) {
+                                val sign = if (info.centsOffsetFromEt >= 0) "+" else ""
+                                String.format(Locale.US, " %s%.1f¢ (%s)", sign, info.centsOffsetFromEt, info.intervalName)
+                            } else {
+                                String.format(Locale.US, " %.1f Hz", info.frequencyHz)
+                            }
+                            val label = if (info.writtenName == info.soundingName) {
+                                "${info.soundingName}$centsText"
+                            } else {
+                                "${info.writtenName}→${info.soundingName}$centsText"
+                            }
+                            Surface(
+                                color = ConsoleSurface,
+                                shape = MaterialTheme.shapes.extraSmall,
+                                border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.4f))
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ElectricSky,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun BeatLedStrip(
-    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>
-) {
-    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
-    val ledDesc = stringResource(R.string.cd_beat_led)
-
-    // Beat LED Strip (caps visually at 12 LEDs cleanly)
-    Row(
-        modifier = Modifier.semantics { contentDescription = ledDesc },
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        val total = beatSnap.totalBeats.coerceIn(2, 12)
-        for (b in 0 until total) {
-            val isCurrent = beatSnap.isPlaying && beatSnap.beatIndex == b
-            val targetColor = when {
-                !isCurrent -> ConsoleSurface
-                beatSnap.isMutedBar -> WarmAmber.copy(alpha = 0.7f)
-                b == 0 -> DownbeatCrimson
-                else -> PitchEmerald
-            }
-            val ledColor by animateColorAsState(
-                targetValue = targetColor,
-                animationSpec = tween(durationMillis = 70),
-                label = "beat_led_$b"
-            )
-            Box(
-                modifier = Modifier
-                    .size(if (b == 0) 11.dp else 8.dp)
-                    .clip(CircleShape)
-                    .background(ledColor)
-            )
         }
     }
 }
@@ -303,6 +331,48 @@ private fun LcdCell(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun BeatLedStrip(
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
+    fallbackTotalBeats: Int,
+    modifier: Modifier = Modifier
+) {
+    val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
+    val ledDesc = stringResource(R.string.cd_beat_led)
+    val total = (if (beatSnap.isPlaying) beatSnap.totalBeats else fallbackTotalBeats).coerceIn(1, 16)
+    val downbeatSize = if (total > 12) 9.dp else 11.dp
+    val beatSize = if (total > 12) 6.dp else 8.dp
+
+    Row(
+        modifier = modifier
+            .horizontalScroll(rememberScrollState())
+            .semantics { contentDescription = ledDesc },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        for (b in 0 until total) {
+            val isCurrent = beatSnap.isPlaying && beatSnap.beatIndex == b
+            val targetColor = when {
+                !isCurrent -> ConsoleSurface
+                beatSnap.isMutedBar -> WarmAmber.copy(alpha = 0.7f)
+                b == 0 -> DownbeatCrimson
+                else -> PitchEmerald
+            }
+            val ledColor by animateColorAsState(
+                targetValue = targetColor,
+                animationSpec = tween(durationMillis = 70),
+                label = "beat_led_$b"
+            )
+            Box(
+                modifier = Modifier
+                    .size(if (b == 0) downbeatSize else beatSize)
+                    .clip(CircleShape)
+                    .background(ledColor)
             )
         }
     }

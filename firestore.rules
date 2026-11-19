@@ -32,7 +32,10 @@ service cloud.firestore {
              data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
              data.notes is string && data.notes.size() <= 300 &&
              data.bpm is int && data.bpm >= 32 && data.bpm <= 280 &&
-             data.timeSignature in ['TWO_FOUR', 'THREE_FOUR', 'FOUR_FOUR', 'FIVE_FOUR', 'SIX_EIGHT', 'NINE_EIGHT', 'TWELVE_EIGHT'] &&
+             data.timeSignature is string && (
+               data.timeSignature in ['TWO_FOUR', 'THREE_FOUR', 'FOUR_FOUR', 'FIVE_FOUR', 'SIX_EIGHT', 'NINE_EIGHT', 'TWELVE_EIGHT'] ||
+               data.timeSignature.matches('^([1-9]|1[0-6])/(1|2|4|8|16)$')
+             ) &&
              data.metronomeSound in ['WOODBLOCK', 'CLICK', 'BELL', 'RIMSHOT'] &&
              data.accentLevel is number && data.accentLevel >= 0.0 && data.accentLevel <= 1.0 &&
              data.quarterLevel is number && data.quarterLevel >= 0.0 && data.quarterLevel <= 1.0 &&

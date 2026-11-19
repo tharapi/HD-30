@@ -45,6 +45,7 @@ import com.example.R
 import com.example.ui.components.ConsoleLcdHeader
 import com.example.ui.components.HarmonyPanel
 import com.example.ui.components.MetronomePanel
+import com.example.ui.components.MidiConnectionDialog
 import com.example.ui.components.PresetsPanel
 import com.example.ui.theme.AnodizedSlate
 import com.example.ui.theme.ElectricSky
@@ -73,10 +74,15 @@ fun HarmonyDirectorScreen(
     val presetsState by viewModel.presetsState.collectAsStateWithLifecycle()
     val activePresetId by viewModel.activePresetId.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val midiState by viewModel.midiConnectionState.collectAsStateWithLifecycle()
+    val sustainPedalDown by viewModel.sustainPedalDown.collectAsStateWithLifecycle()
+    val midiMappings by viewModel.midiMappings.collectAsStateWithLifecycle()
+    val learningTarget by viewModel.learningTarget.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by rememberSaveable { mutableStateOf(ConsoleTab.HARMONY) }
     var expandedSection by rememberSaveable { mutableStateOf(ExpandedSection.DUAL_CONSOLE) }
+    var showMidiDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(viewModel) {
         viewModel.snackbarEvents.collect { msg ->
@@ -190,7 +196,9 @@ fun HarmonyDirectorScreen(
                             metronomeState = metronomeState,
                             beatSnapshotFlow = viewModel.beatSnapshot,
                             onStopAllSound = viewModel::stopAllSound,
-                            onSignOut = onSignOut
+                            onSignOut = onSignOut,
+                            midiState = midiState,
+                            onOpenMidiSettings = { showMidiDialog = true }
                         )
 
                         when (expandedSection) {
@@ -269,7 +277,9 @@ fun HarmonyDirectorScreen(
                         metronomeState = metronomeState,
                         beatSnapshotFlow = viewModel.beatSnapshot,
                         onStopAllSound = viewModel::stopAllSound,
-                        onSignOut = onSignOut
+                        onSignOut = onSignOut,
+                        midiState = midiState,
+                        onOpenMidiSettings = { showMidiDialog = true }
                     )
 
                     Box(modifier = Modifier.weight(1f)) {
@@ -322,6 +332,29 @@ fun HarmonyDirectorScreen(
                     }
                 }
             }
+        }
+
+        if (showMidiDialog) {
+            MidiConnectionDialog(
+                midiState = midiState,
+                sustainPedalDown = sustainPedalDown,
+                midiMappings = midiMappings,
+                learningTarget = learningTarget,
+                onDismiss = {
+                    viewModel.cancelMidiLearn()
+                    viewModel.clearMidiStatus()
+                    showMidiDialog = false
+                },
+                onRefreshUsb = viewModel::refreshMidiDevices,
+                onConnectUsbDevice = viewModel::connectMidiDevice,
+                onDisconnectUsbDevice = viewModel::disconnectMidiDevice,
+                onStartBleScan = viewModel::startBleMidiScan,
+                onStopBleScan = viewModel::stopBleMidiScan,
+                onConnectBleDevice = viewModel::connectBleMidiDevice,
+                onStartMidiLearn = viewModel::startMidiLearn,
+                onCancelMidiLearn = viewModel::cancelMidiLearn,
+                onResetDefaultMappings = viewModel::resetDefaultMidiMappings
+            )
         }
     }
 }

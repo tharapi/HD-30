@@ -152,3 +152,23 @@ test("Security rules reject ghost fields, @DocumentId `id` field, out-of-range v
     })
   );
 });
+
+test("Security rules accept custom <1-16>/<1|2|4|8|16> timeSignature and reject invalid numerators or denominators", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const col = aliceDb.collection(`users/${ALICE_UID}/rehearsal_presets`);
+
+  await assertSucceeds(col.doc("meter_7_8").set(validPresetPayload(ALICE_UID, { timeSignature: "7/8" })));
+  await assertSucceeds(col.doc("meter_16_16").set(validPresetPayload(ALICE_UID, { timeSignature: "16/16" })));
+  await assertSucceeds(col.doc("meter_1_1").set(validPresetPayload(ALICE_UID, { timeSignature: "1/1" })));
+  await assertSucceeds(col.doc("meter_legacy").set(validPresetPayload(ALICE_UID, { timeSignature: "TWELVE_EIGHT" })));
+
+  // Reject out-of-range numerator (0 or 17)
+  await assertFails(col.doc("bad_meter_0").set(validPresetPayload(ALICE_UID, { timeSignature: "0/4" })));
+  await assertFails(col.doc("bad_meter_17").set(validPresetPayload(ALICE_UID, { timeSignature: "17/4" })));
+
+  // Reject unlocked denominators (3, 6, 32)
+  await assertFails(col.doc("bad_meter_den3").set(validPresetPayload(ALICE_UID, { timeSignature: "4/3" })));
+  await assertFails(col.doc("bad_meter_den6").set(validPresetPayload(ALICE_UID, { timeSignature: "6/6" })));
+  await assertFails(col.doc("bad_meter_den32").set(validPresetPayload(ALICE_UID, { timeSignature: "4/32" })));
+});
+

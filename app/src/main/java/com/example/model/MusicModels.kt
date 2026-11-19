@@ -32,18 +32,51 @@ enum class ToneVoice(val label: String, val category: String) {
     PIANO("Piano", "Keyboard")
 }
 
-enum class TimeSignature(
-    val label: String,
-    val beatsPerMeasure: Int,
-    val isCompound: Boolean
+data class TimeSignature(
+    val numerator: Int = 4,
+    val denominator: Int = 4
 ) {
-    TWO_FOUR("2/4", 2, false),
-    THREE_FOUR("3/4", 3, false),
-    FOUR_FOUR("4/4", 4, false),
-    FIVE_FOUR("5/4", 5, false),
-    SIX_EIGHT("6/8", 6, true),
-    NINE_EIGHT("9/8", 9, true),
-    TWELVE_EIGHT("12/8", 12, true)
+    val label: String get() = "$numerator/$denominator"
+    val beatsPerMeasure: Int get() = numerator.coerceIn(MIN_NUMERATOR, MAX_NUMERATOR)
+    val isCompound: Boolean
+        get() = (denominator == 8 || denominator == 16) && numerator >= 6 && numerator % 3 == 0
+
+    fun toStorageString(): String = "$beatsPerMeasure/$denominator"
+
+    companion object {
+        const val MIN_NUMERATOR = 1
+        const val MAX_NUMERATOR = 16
+        val ALLOWED_DENOMINATORS = listOf(1, 2, 4, 8, 16)
+
+        val FOUR_FOUR = TimeSignature(4, 4)
+
+        fun create(numerator: Int, denominator: Int): TimeSignature {
+            val safeNum = numerator.coerceIn(MIN_NUMERATOR, MAX_NUMERATOR)
+            val safeDen = if (denominator in ALLOWED_DENOMINATORS) denominator else 4
+            return TimeSignature(safeNum, safeDen)
+        }
+
+        fun fromStorageString(raw: String): TimeSignature {
+            when (raw.trim().uppercase()) {
+                "TWO_FOUR" -> return TimeSignature(2, 4)
+                "THREE_FOUR" -> return TimeSignature(3, 4)
+                "FOUR_FOUR" -> return TimeSignature(4, 4)
+                "FIVE_FOUR" -> return TimeSignature(5, 4)
+                "SIX_EIGHT" -> return TimeSignature(6, 8)
+                "NINE_EIGHT" -> return TimeSignature(9, 8)
+                "TWELVE_EIGHT" -> return TimeSignature(12, 8)
+            }
+            val parts = raw.trim().split("/")
+            if (parts.size == 2) {
+                val num = parts[0].toIntOrNull()
+                val den = parts[1].toIntOrNull()
+                if (num != null && den != null && num in MIN_NUMERATOR..MAX_NUMERATOR && den in ALLOWED_DENOMINATORS) {
+                    return TimeSignature(num, den)
+                }
+            }
+            return FOUR_FOUR
+        }
+    }
 }
 
 enum class MetronomeSound(val label: String) {
@@ -193,7 +226,7 @@ data class RehearsalPreset(
     val title: String = "",
     val notes: String = "",
     val bpm: Long = 120L,
-    val timeSignature: String = TimeSignature.FOUR_FOUR.name,
+    val timeSignature: String = TimeSignature.FOUR_FOUR.toStorageString(),
     val metronomeSound: String = MetronomeSound.WOODBLOCK.name,
     val accentLevel: Double = 1.0,
     val quarterLevel: Double = 0.85,
@@ -211,7 +244,7 @@ data class RehearsalPreset(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun safeTimeSignature(): TimeSignature =
-        enumValues<TimeSignature>().firstOrNull { it.name == timeSignature } ?: TimeSignature.FOUR_FOUR
+        TimeSignature.fromStorageString(timeSignature)
 
     fun safeMetronomeSound(): MetronomeSound =
         enumValues<MetronomeSound>().firstOrNull { it.name == metronomeSound } ?: MetronomeSound.WOODBLOCK

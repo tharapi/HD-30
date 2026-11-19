@@ -21,6 +21,7 @@ import com.example.auth.AuthScreen
 import com.example.auth.authStateFlow
 import com.example.auth.signOut
 import com.example.data.RehearsalPresetRepository
+import com.example.midi.MidiInputController
 import com.example.ui.ConsoleViewModel
 import com.example.ui.HarmonyDirectorScreen
 import com.example.ui.theme.HarmonyDirectorTheme
@@ -67,7 +68,8 @@ fun AppNavigation() {
                         ConsoleViewModel(
                             repository = RehearsalPresetRepository(db = db, auth = auth),
                             audioEngine = HarmonyAudioEngine(),
-                            currentUserId = uid
+                            currentUserId = uid,
+                            midiController = MidiInputController(app.applicationContext)
                         )
                     }
                 }

@@ -18,4 +18,9 @@
     <string name="cd_beat_led">Metronome Beat Indicator</string>
     <string name="cd_stop_all">Stop all sustained notes and metronome</string>
     <string name="cd_play_metronome">Start or stop metronome</string>
+    <string name="midi_setup_title">MIDI Keyboard Link (SMK-37 PRO)</string>
+    <string name="midi_scan_ble">Scan BLE MIDI</string>
+    <string name="midi_stop_scan">Stop Scan</string>
+    <string name="midi_refresh_usb">Refresh USB</string>
+    <string name="cd_midi_status">Open MIDI keyboard connection settings</string>
 </resources>

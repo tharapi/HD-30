@@ -45,6 +45,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -534,6 +536,9 @@ private fun PlayablePianoKeyboard(
         10 to 5.64f
     )
     val totalWhiteKeys = octaves * 7
+    val currentHoldEnabled by rememberUpdatedState(chordHoldEnabled)
+    val currentOnPressed by rememberUpdatedState(onKeyPressed)
+    val currentOnReleased by rememberUpdatedState(onKeyReleased)
 
     BoxWithConstraints(
         modifier = modifier
@@ -573,13 +578,17 @@ private fun PlayablePianoKeyboard(
                                 shape = keyShape
                             )
                             .testTag("piano_key_$midi")
-                            .pointerInput(midi, chordHoldEnabled) {
+                            .pointerInput(midi) {
                                 awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    onKeyPressed(midi)
-                                    waitForUpOrCancellation()
-                                    if (!chordHoldEnabled) {
-                                        onKeyReleased(midi)
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    down.consume()
+                                    currentOnPressed(midi)
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        event.changes.forEach { it.consume() }
+                                    } while (event.changes.any { it.pressed })
+                                    if (!currentHoldEnabled) {
+                                        currentOnReleased(midi)
                                     }
                                 }
                             },
@@ -624,13 +633,17 @@ private fun PlayablePianoKeyboard(
                             shape = blackShape
                         )
                         .testTag("piano_key_$midi")
-                        .pointerInput(midi, chordHoldEnabled) {
+                        .pointerInput(midi) {
                             awaitEachGesture {
-                                awaitFirstDown(requireUnconsumed = false)
-                                onKeyPressed(midi)
-                                waitForUpOrCancellation()
-                                if (!chordHoldEnabled) {
-                                    onKeyReleased(midi)
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                down.consume()
+                                currentOnPressed(midi)
+                                do {
+                                    val event = awaitPointerEvent()
+                                    event.changes.forEach { it.consume() }
+                                } while (event.changes.any { it.pressed })
+                                if (!currentHoldEnabled) {
+                                    currentOnReleased(midi)
                                 }
                             }
                         },
