@@ -87,7 +87,10 @@ enum class MidiControlTarget(
     METER_TOP_VALUE("Meter Top (1-16)", -1, false),
     METER_BOTTOM_VALUE("Meter Bottom", -1, false),
     METER_TOP_STEP("Meter Top +1", -1, true),
-    METER_BOTTOM_STEP("Meter Bottom Step", -1, true)
+    METER_BOTTOM_STEP("Meter Bottom Step", -1, true),
+    METRONOME_VOLUME("Metro Vol", -1, false),
+    NEXT_TONE_VOICE("Next Voice", -1, true),
+    NEXT_METRONOME_SOUND("Next Click", -1, true)
 }
 
 class ConsoleViewModel(
@@ -208,6 +211,12 @@ class ConsoleViewModel(
     fun selectVoice(voice: ToneVoice) {
         _harmonyState.update { it.copy(voice = voice) }
         audioEngine.setToneVoice(voice)
+    }
+
+    fun cycleToneVoice() {
+        val voices = ToneVoice.entries
+        val idx = voices.indexOf(_harmonyState.value.voice).coerceAtLeast(0)
+        selectVoice(voices[(idx + 1) % voices.size])
     }
 
     fun setToneGain(gain: Float) {
@@ -339,6 +348,12 @@ class ConsoleViewModel(
     fun selectMetronomeSound(sound: MetronomeSound) {
         _metronomeConfig.update { it.copy(metronomeSound = sound) }
         pushMetronomeAudioConfig()
+    }
+
+    fun cycleMetronomeSound() {
+        val sounds = MetronomeSound.entries
+        val idx = sounds.indexOf(_metronomeConfig.value.metronomeSound).coerceAtLeast(0)
+        selectMetronomeSound(sounds[(idx + 1) % sounds.size])
     }
 
     fun updateSubdivisionMix(transform: (SubdivisionMix) -> SubdivisionMix) {
@@ -509,6 +524,8 @@ class ConsoleViewModel(
                         MidiControlTarget.MUTE_ALL -> stopAllSound()
                         MidiControlTarget.METER_TOP_STEP -> cycleTimeSignatureNumerator()
                         MidiControlTarget.METER_BOTTOM_STEP -> cycleTimeSignatureDenominator()
+                        MidiControlTarget.NEXT_TONE_VOICE -> cycleToneVoice()
+                        MidiControlTarget.NEXT_METRONOME_SOUND -> cycleMetronomeSound()
                         else -> Unit
                     }
                 }
@@ -516,6 +533,7 @@ class ConsoleViewModel(
                 val normalized = (value / 127f).coerceIn(0f, 1f)
                 when (matchedTarget) {
                     MidiControlTarget.TONE_VOLUME -> setToneGain(normalized)
+                    MidiControlTarget.METRONOME_VOLUME -> setMetronomeGain(normalized)
                     MidiControlTarget.BPM -> {
                         val bpm = (32 + kotlin.math.round(normalized * (280 - 32))).toInt()
                         setBpm(bpm)

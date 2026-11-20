@@ -2,11 +2,16 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.audio.HarmonyAudioEngine
+import com.example.data.LocalFallbackPresetRepository
 import com.example.midi.MidiHardwareEvent
 import com.example.midi.MidiInputController
 import com.example.midi.MidiNoteStateTracker
 import com.example.midi.MidiStreamParser
+import com.example.model.MetronomeSound
 import com.example.model.TimeSignature
+import com.example.model.ToneVoice
+import com.example.ui.ConsoleViewModel
 import com.example.ui.MidiControlTarget
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -246,12 +251,82 @@ class MidiParserAndMappingUnitTest {
         assertEquals(41, MidiControlTarget.TOGGLE_CHORD_HOLD.defaultCc)
         assertEquals(42, MidiControlTarget.TOGGLE_TEMPERAMENT.defaultCc)
         assertEquals(47, MidiControlTarget.MUTE_ALL.defaultCc)
-        // Meter MIDI Learn bindings are unassigned by default so they never collide with SMK-37 PRO defaults
+        // Meter, Metronome Vol, and Voice/Click cycle MIDI Learn bindings are unassigned by default
         assertEquals(-1, MidiControlTarget.METER_TOP_VALUE.defaultCc)
         assertEquals(-1, MidiControlTarget.METER_BOTTOM_VALUE.defaultCc)
         assertEquals(-1, MidiControlTarget.METER_TOP_STEP.defaultCc)
         assertEquals(-1, MidiControlTarget.METER_BOTTOM_STEP.defaultCc)
+        assertEquals(-1, MidiControlTarget.METRONOME_VOLUME.defaultCc)
+        assertEquals(-1, MidiControlTarget.NEXT_TONE_VOICE.defaultCc)
+        assertEquals(-1, MidiControlTarget.NEXT_METRONOME_SOUND.defaultCc)
         assertTrue(assignedCcs.all { it in 0..127 })
+    }
+
+    @Test
+    fun `unassigned metronome volume and voice-cycle MIDI targets work once learned`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = LocalFallbackPresetRepository(context)
+        val engine = HarmonyAudioEngine()
+        try {
+            val vm = ConsoleViewModel(
+                repository = repo,
+                audioEngine = engine,
+                currentUserId = "test-user"
+            )
+
+            // Unassigned CCs must not alter state before MIDI Learn
+            val initialMetroGain = vm.metronomeState.value.metronomeGain
+            val initialVoice = vm.harmonyState.value.voice
+            val initialSound = vm.metronomeState.value.metronomeSound
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            assertEquals(initialMetroGain, vm.metronomeState.value.metronomeGain, 1e-4f)
+            assertEquals(initialVoice, vm.harmonyState.value.voice)
+            assertEquals(initialSound, vm.metronomeState.value.metronomeSound)
+
+            // Learn & control Metronome Master Volume on CC 70
+            vm.startMidiLearn(MidiControlTarget.METRONOME_VOLUME)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 64, 0))
+            assertEquals(70, vm.midiMappings.value[MidiControlTarget.METRONOME_VOLUME])
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 127, 0))
+            assertEquals(1.0f, vm.metronomeState.value.metronomeGain, 1e-4f)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 0, 0))
+            assertEquals(0.0f, vm.metronomeState.value.metronomeGain, 1e-4f)
+
+            // Learn & trigger Harmony Voice cycle on CC 71 (rising edge only)
+            vm.startMidiLearn(MidiControlTarget.NEXT_TONE_VOICE)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 0, 0))
+            assertEquals(71, vm.midiMappings.value[MidiControlTarget.NEXT_TONE_VOICE])
+            vm.selectVoice(ToneVoice.ORGAN)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            assertEquals(ToneVoice.BRASS, vm.harmonyState.value.voice)
+            // Repeated high value without release must not double-trigger
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            assertEquals(ToneVoice.BRASS, vm.harmonyState.value.voice)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            assertEquals(ToneVoice.WOODWIND, vm.harmonyState.value.voice)
+
+            // Learn & trigger Metronome Sound cycle on CC 72 (wraps around all 4 sounds)
+            vm.startMidiLearn(MidiControlTarget.NEXT_METRONOME_SOUND)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
+            assertEquals(72, vm.midiMappings.value[MidiControlTarget.NEXT_METRONOME_SOUND])
+            vm.selectMetronomeSound(MetronomeSound.WOODBLOCK)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            assertEquals(MetronomeSound.CLICK, vm.metronomeState.value.metronomeSound)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            assertEquals(MetronomeSound.BELL, vm.metronomeState.value.metronomeSound)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            assertEquals(MetronomeSound.RIMSHOT, vm.metronomeState.value.metronomeSound)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            assertEquals(MetronomeSound.WOODBLOCK, vm.metronomeState.value.metronomeSound)
+        } finally {
+            engine.release()
+        }
     }
 
     @Test

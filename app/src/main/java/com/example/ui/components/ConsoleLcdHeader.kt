@@ -23,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -54,6 +55,7 @@ import com.example.ui.MetronomeUiState
 import com.example.ui.theme.ConsoleSurface
 import com.example.ui.theme.DownbeatCrimson
 import com.example.ui.theme.ElectricSky
+import com.example.ui.theme.ElectricSkyContainer
 import com.example.ui.theme.HardwareBorder
 import com.example.ui.theme.LcdBorder
 import com.example.ui.theme.LcdMidnight
@@ -75,7 +77,8 @@ fun ConsoleLcdHeader(
     midiState: MidiConnectionUiState = MidiConnectionUiState(),
     onOpenMidiSettings: () -> Unit = {},
     audioOutputMode: AudioOutputMode = AudioOutputMode.MIXED,
-    onToggleOutputMode: () -> Unit = {}
+    onToggleOutputMode: () -> Unit = {},
+    onOpenMonitorMode: () -> Unit = {}
 ) {
     val hasActiveSound = harmonyState.activeWrittenMidis.isNotEmpty() || metronomeState.isPlaying
     val isMidiConnected = midiState.connectedDeviceName != null
@@ -240,13 +243,13 @@ fun ConsoleLcdHeader(
                 )
             }
 
-            // Fixed-height Active Notes Readout + Quick Audio Output Routing Toggle
+            // Fixed-height Active Notes Readout + Quick Audio Output Routing & Monitor Mode buttons
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(32.dp),
+                    .height(34.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Box(
                     modifier = Modifier.weight(1f),
@@ -309,12 +312,12 @@ fun ConsoleLcdHeader(
                         if (isSplit) WarmAmber else HardwareBorder
                     ),
                     modifier = Modifier
-                        .height(30.dp)
+                        .height(32.dp)
                         .semantics { contentDescription = outputCd }
                         .testTag("lcd_output_mode_button")
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp),
+                        modifier = Modifier.padding(horizontal = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -329,6 +332,38 @@ fun ConsoleLcdHeader(
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (isSplit) WarmAmber else ElectricSky,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                val monitorCd = stringResource(R.string.cd_open_monitor)
+                Surface(
+                    onClick = onOpenMonitorMode,
+                    color = ElectricSkyContainer,
+                    shape = MaterialTheme.shapes.extraSmall,
+                    border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.7f)),
+                    modifier = Modifier
+                        .height(32.dp)
+                        .semantics { contentDescription = monitorCd }
+                        .testTag("lcd_monitor_mode_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Visibility,
+                            contentDescription = null,
+                            tint = ElectricSky,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = stringResource(R.string.monitor_mode_button),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = ElectricSky,
                             maxLines = 1
                         )
                     }

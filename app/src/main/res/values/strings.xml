@@ -24,4 +24,10 @@
     <string name="midi_refresh_usb">Refresh USB</string>
     <string name="cd_midi_status">Open MIDI keyboard connection settings</string>
     <string name="cd_audio_output_mode">Toggle audio output routing between Mixed and Split L/R</string>
+    <string name="monitor_mode_button">MONITOR</string>
+    <string name="monitor_mode_badge">MONITOR · LOCKED</string>
+    <string name="monitor_hold_to_exit">HOLD EXIT</string>
+    <string name="monitor_holding_exit">HOLDING…</string>
+    <string name="cd_open_monitor">Open read-only MIDI keyboard monitor mode</string>
+    <string name="cd_hold_exit_monitor">Press and hold to unlock and exit MIDI monitor mode</string>
 </resources>

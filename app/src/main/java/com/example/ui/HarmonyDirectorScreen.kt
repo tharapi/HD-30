@@ -46,6 +46,7 @@ import com.example.ui.components.ConsoleLcdHeader
 import com.example.ui.components.HarmonyPanel
 import com.example.ui.components.MetronomePanel
 import com.example.ui.components.MidiConnectionDialog
+import com.example.ui.components.MidiMonitorScreen
 import com.example.ui.components.PresetsPanel
 import com.example.ui.theme.AnodizedSlate
 import com.example.ui.theme.ElectricSky
@@ -84,6 +85,20 @@ fun HarmonyDirectorScreen(
     var selectedTab by rememberSaveable { mutableStateOf(ConsoleTab.HARMONY) }
     var expandedSection by rememberSaveable { mutableStateOf(ExpandedSection.DUAL_CONSOLE) }
     var showMidiDialog by rememberSaveable { mutableStateOf(false) }
+    var showMonitorMode by rememberSaveable { mutableStateOf(false) }
+
+    if (showMonitorMode) {
+        MidiMonitorScreen(
+            harmonyState = harmonyState,
+            metronomeState = metronomeState,
+            beatSnapshotFlow = viewModel.beatSnapshot,
+            midiState = midiState,
+            sustainPedalDown = sustainPedalDown,
+            audioOutputMode = audioOutputMode,
+            onExitMonitor = { showMonitorMode = false }
+        )
+        return
+    }
 
     LaunchedEffect(viewModel) {
         viewModel.snackbarEvents.collect { msg ->
@@ -201,7 +216,11 @@ fun HarmonyDirectorScreen(
                             midiState = midiState,
                             onOpenMidiSettings = { showMidiDialog = true },
                             audioOutputMode = audioOutputMode,
-                            onToggleOutputMode = viewModel::toggleAudioOutputMode
+                            onToggleOutputMode = viewModel::toggleAudioOutputMode,
+                            onOpenMonitorMode = {
+                                showMidiDialog = false
+                                showMonitorMode = true
+                            }
                         )
 
                         when (expandedSection) {
@@ -286,7 +305,11 @@ fun HarmonyDirectorScreen(
                         midiState = midiState,
                         onOpenMidiSettings = { showMidiDialog = true },
                         audioOutputMode = audioOutputMode,
-                        onToggleOutputMode = viewModel::toggleAudioOutputMode
+                        onToggleOutputMode = viewModel::toggleAudioOutputMode,
+                        onOpenMonitorMode = {
+                            showMidiDialog = false
+                            showMonitorMode = true
+                        }
                     )
 
                     Box(modifier = Modifier.weight(1f)) {
