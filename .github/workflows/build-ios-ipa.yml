@@ -1,0 +1,120 @@
+name: Build iOS Unsigned IPA
+
+on:
+  push:
+    paths:
+      - 'ios/**'
+      - 'app/src/main/res/raw/**'
+      - 'app/src/main/assets/samples/**'
+      - '.github/workflows/build-ios-ipa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios-ipa:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode & macOS environment
+        run: |
+          sw_vers
+          xcodebuild -version
+
+      - name: Prepare bundled audio samples & AppIcon
+        run: bash ios/scripts/prepare_assets.sh
+
+      - name: Install XcodeGen and generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec ios/project.yml --project ios
+
+      - name: Run iOS Simulator unit tests (XCTest)
+        run: |
+          set -o pipefail
+          SIM_UDID=$(python3 -c '
+          import json, subprocess, sys
+          data = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"]))
+          for runtime, devs in sorted(data.get("devices", {}).items(), reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for d in devs:
+                  if d.get("isAvailable") and "iPhone" in d.get("name", ""):
+                      print(d["udid"])
+                      sys.exit(0)
+          sys.exit(1)
+          ')
+          echo "Selected iOS Simulator UDID: $SIM_UDID"
+          xcodebuild test \
+            -project ios/HarmonyDirector.xcodeproj \
+            -scheme HarmonyDirector \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "id=$SIM_UDID" \
+            -derivedDataPath build/ios-sim \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="-" \
+            | tee ios-test.log
+
+      - name: Build unsigned Release iOS app (iphoneos)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/HarmonyDirector.xcodeproj \
+            -scheme HarmonyDirector \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/ios-device \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            | tee ios-build.log
+
+      - name: Package Harmony-Director-unsigned.ipa
+        run: |
+          APP_PATH="build/ios-device/Build/Products/Release-iphoneos/HarmonyDirector.app"
+          test -d "$APP_PATH"
+          rm -rf build/ipa Harmony-Director-unsigned.ipa
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/HarmonyDirector.app
+          (cd build/ipa && zip -qr "$GITHUB_WORKSPACE/Harmony-Director-unsigned.ipa" Payload)
+          ls -lh Harmony-Director-unsigned.ipa
+          echo "Bundled audio verification:"
+          unzip -l Harmony-Director-unsigned.ipa | grep -E 'Audio/(Metronome|Piano)/' | head -n 30
+
+      - name: Publish failure summary if build failed
+        if: failure()
+        run: |
+          {
+            echo "### iOS Build / Test Error Log (last 80 lines)"
+            echo '```text'
+            tail -n 80 ios-build.log ios-test.log 2>/dev/null || echo "No logs found."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Harmony-Director-iOS-Unsigned-IPA
+          path: Harmony-Director-unsigned.ipa
+          retention-days: 30
+
+      - name: Publish unsigned IPA on GitHub Releases (main or manual dispatch)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view latest-ios-ipa >/dev/null 2>&1; then
+            gh release upload latest-ios-ipa Harmony-Director-unsigned.ipa --clobber
+          else
+            gh release create latest-ios-ipa Harmony-Director-unsigned.ipa \
+              --title "Harmony Director iOS (Unsigned IPA)" \
+              --notes "Auto-built unsigned iOS IPA via GitHub Actions (macos-latest). Install on iPhone/iPad using Sideloadly, AltStore, or SideStore (re-signs with your Apple ID; expires every 7 days on free Apple accounts)."
+          fi
