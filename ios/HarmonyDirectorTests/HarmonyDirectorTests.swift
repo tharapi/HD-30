@@ -169,6 +169,6 @@ final class HarmonyDirectorTests: XCTestCase {
         let pianoData = try Data(contentsOf: resolvedPianoURL)
         let zone = try XCTUnwrap(WavSampleDecoder.decodeInstrumentZone(pianoData, fallbackMidi: 60))
         XCTAssertGreaterThan(zone.pcm.count, 1000)
-        XCTAssertEqual(zone.midiNote, 60)
+        XCTAssertEqual(zone.rootFreqHz, 261.6256, accuracy: 2.0)
     }
 }
