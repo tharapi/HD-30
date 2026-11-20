@@ -240,30 +240,30 @@ class MidiParserAndMappingUnitTest {
         assertEquals(assignedCcs.size, assignedCcs.toSet().size)
         assertEquals(49, MidiControlTarget.TONE_VOLUME.defaultCc)
         assertEquals(48, MidiControlTarget.BPM.defaultCc)
+        assertEquals(50, MidiControlTarget.METER_TOP_VALUE.defaultCc)
+        assertEquals(51, MidiControlTarget.METER_BOTTOM_VALUE.defaultCc)
         assertEquals(1, MidiControlTarget.ACCENT_LEVEL.defaultCc)
         assertEquals(64, MidiControlTarget.QUARTER_LEVEL.defaultCc)
         assertEquals(65, MidiControlTarget.EIGHTH_LEVEL.defaultCc)
         assertEquals(66, MidiControlTarget.TRIPLET_LEVEL.defaultCc)
         assertEquals(67, MidiControlTarget.SIXTEENTH_LEVEL.defaultCc)
-        assertEquals(36, MidiControlTarget.TAP_TEMPO.defaultCc)
-        assertEquals(37, MidiControlTarget.CLEAR_HELD.defaultCc)
+        assertEquals(32, MidiControlTarget.TAP_TEMPO.defaultCc)
+        assertEquals(33, MidiControlTarget.CLEAR_HELD.defaultCc)
         assertEquals(40, MidiControlTarget.TOGGLE_METRONOME.defaultCc)
         assertEquals(41, MidiControlTarget.TOGGLE_CHORD_HOLD.defaultCc)
-        assertEquals(42, MidiControlTarget.TOGGLE_TEMPERAMENT.defaultCc)
-        assertEquals(47, MidiControlTarget.MUTE_ALL.defaultCc)
-        // Meter, Metronome Vol, and Voice/Click cycle MIDI Learn bindings are unassigned by default
-        assertEquals(-1, MidiControlTarget.METER_TOP_VALUE.defaultCc)
-        assertEquals(-1, MidiControlTarget.METER_BOTTOM_VALUE.defaultCc)
+        assertEquals(46, MidiControlTarget.NEXT_TONE_VOICE.defaultCc)
+        assertEquals(47, MidiControlTarget.TOGGLE_TEMPERAMENT.defaultCc)
+        assertEquals(38, MidiControlTarget.NEXT_METRONOME_SOUND.defaultCc)
+        assertEquals(39, MidiControlTarget.MUTE_ALL.defaultCc)
+        // Step meter buttons and Metronome Vol remain unassigned by default
         assertEquals(-1, MidiControlTarget.METER_TOP_STEP.defaultCc)
         assertEquals(-1, MidiControlTarget.METER_BOTTOM_STEP.defaultCc)
         assertEquals(-1, MidiControlTarget.METRONOME_VOLUME.defaultCc)
-        assertEquals(-1, MidiControlTarget.NEXT_TONE_VOICE.defaultCc)
-        assertEquals(-1, MidiControlTarget.NEXT_METRONOME_SOUND.defaultCc)
         assertTrue(assignedCcs.all { it in 0..127 })
     }
 
     @Test
-    fun `unassigned metronome volume and voice-cycle MIDI targets work once learned`() {
+    fun `default voice and click cycle CCs plus learned metronome volume work accurately`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val repo = LocalFallbackPresetRepository(context)
         val engine = HarmonyAudioEngine()
@@ -274,16 +274,10 @@ class MidiParserAndMappingUnitTest {
                 currentUserId = "test-user"
             )
 
-            // Unassigned CCs must not alter state before MIDI Learn
+            // Unassigned CC #70 must not alter state before MIDI Learn
             val initialMetroGain = vm.metronomeState.value.metronomeGain
-            val initialVoice = vm.harmonyState.value.voice
-            val initialSound = vm.metronomeState.value.metronomeSound
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 127, 0))
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
             assertEquals(initialMetroGain, vm.metronomeState.value.metronomeGain, 1e-4f)
-            assertEquals(initialVoice, vm.harmonyState.value.voice)
-            assertEquals(initialSound, vm.metronomeState.value.metronomeSound)
 
             // Learn & control Metronome Master Volume on CC 70
             vm.startMidiLearn(MidiControlTarget.METRONOME_VOLUME)
@@ -296,39 +290,39 @@ class MidiParserAndMappingUnitTest {
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 0, 0))
             assertEquals(0.0f, vm.metronomeState.value.metronomeGain, 1e-4f)
 
-            // Learn & trigger Harmony Voice cycle on CC 71 (rising edge only)
-            vm.startMidiLearn(MidiControlTarget.NEXT_TONE_VOICE)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 0, 0))
-            assertEquals(71, vm.midiMappings.value[MidiControlTarget.NEXT_TONE_VOICE])
+            // Default CC 46 cycles Harmony Voice (rising edge only)
             vm.selectVoice(ToneVoice.ORGAN)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(46, 127, 0))
             assertEquals(ToneVoice.BRASS, vm.harmonyState.value.voice)
             val seqAfterTrigger = vm.lastMidiControlPulse.value.seq
             assertEquals(MidiControlTarget.NEXT_TONE_VOICE, vm.lastMidiControlPulse.value.target)
             // Repeated high value without release must not double-trigger or double-pulse
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(46, 127, 0))
             assertEquals(ToneVoice.BRASS, vm.harmonyState.value.voice)
             assertEquals(seqAfterTrigger, vm.lastMidiControlPulse.value.seq)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 0, 0))
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(46, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(46, 127, 0))
             assertEquals(ToneVoice.WOODWIND, vm.harmonyState.value.voice)
 
-            // Learn & trigger Metronome Sound cycle on CC 72 (wraps around all 4 sounds)
-            vm.startMidiLearn(MidiControlTarget.NEXT_METRONOME_SOUND)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
-            assertEquals(72, vm.midiMappings.value[MidiControlTarget.NEXT_METRONOME_SOUND])
+            // Default CC 38 cycles Metronome Sound (wraps around all 4 sounds)
             vm.selectMetronomeSound(MetronomeSound.WOODBLOCK)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 127, 0))
             assertEquals(MetronomeSound.CLICK, vm.metronomeState.value.metronomeSound)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 127, 0))
             assertEquals(MetronomeSound.BELL, vm.metronomeState.value.metronomeSound)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 127, 0))
             assertEquals(MetronomeSound.RIMSHOT, vm.metronomeState.value.metronomeSound)
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 0, 0))
-            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(72, 127, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 0, 0))
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(38, 127, 0))
             assertEquals(MetronomeSound.WOODBLOCK, vm.metronomeState.value.metronomeSound)
+
+            // Default CC 50 / 51 adjust Time Signature numerator and denominator
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(50, 127, 0))
+            assertEquals(16, vm.metronomeState.value.timeSignature.numerator)
+            vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(51, 127, 0))
+            assertEquals(16, vm.metronomeState.value.timeSignature.denominator)
         } finally {
             engine.release()
         }

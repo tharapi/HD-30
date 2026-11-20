@@ -80,10 +80,12 @@ import com.example.R
 import com.example.audio.MetronomeBeatSnapshot
 import com.example.midi.MidiConnectionUiState
 import com.example.model.AudioOutputMode
+import com.example.model.MetronomeSound
 import com.example.model.NotePitchInfo
 import com.example.model.PitchTheory
 import com.example.model.TemperamentMode
 import com.example.model.TimeSignature
+import com.example.model.ToneVoice
 import com.example.ui.HarmonyUiState
 import com.example.ui.MetronomeUiState
 import com.example.ui.MidiControlPulse
@@ -170,12 +172,40 @@ private data class PadSlotModel(
 }
 
 private data class FaderSlotModel(
-    val target: MidiControlTarget,
+    val target: MidiControlTarget?,
     val label: String,
     val cc: Int,
     val level: Float,
     val accentColor: Color
-)
+) {
+    val isAssigned: Boolean get() = target != null && cc >= 0
+
+    companion object {
+        fun empty(slotCc: Int) = FaderSlotModel(
+            target = null,
+            label = "—",
+            cc = slotCc,
+            level = 0f,
+            accentColor = HardwareBorder
+        )
+    }
+}
+
+private fun voiceShortTag(voice: ToneVoice): String = when (voice) {
+    ToneVoice.PURE_SINE -> "SINE"
+    ToneVoice.ORGAN -> "ORG"
+    ToneVoice.BRASS -> "BRS"
+    ToneVoice.WOODWIND -> "WIND"
+    ToneVoice.STRINGS -> "STR"
+    ToneVoice.PIANO -> "PNO"
+}
+
+private fun clickShortTag(sound: MetronomeSound): String = when (sound) {
+    MetronomeSound.WOODBLOCK -> "WOOD"
+    MetronomeSound.CLICK -> "CLK"
+    MetronomeSound.BELL -> "BELL"
+    MetronomeSound.RIMSHOT -> "RIM"
+}
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
@@ -187,8 +217,10 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
  * Full-screen, zero-scroll, touch-locked SMK-37 PRO hardware-faceplate MIDI Monitor Mode.
  * - Locks orientation to landscape while active and restores user orientation on exit.
  * - Keeps screen awake automatically and blocks Back gestures.
- * - Mirrors the exact M-VAVE SMK-37 PRO control layout (Mod Wheel CC #1, 8 Knobs, 16 Pads,
- *   4 Faders, Yellow & Purple Metronome zones, Red 37-key Read-Only Keyboard, Green Harmony zone).
+ * - Mirrors the exact M-VAVE SMK-37 PRO physical CC grid:
+ *   Mod Wheel (CC #1), 8 Knobs (CC #48..#55), 8 Top Pads (CC #40..#47),
+ *   8 Bottom Pads (CC #32..#39), 4 Faders (CC #64..#67),
+ *   Yellow & Purple Metronome zones, Red 37-key Read-Only Keyboard, Green Harmony zone.
  * - Exits ONLY via press-and-hold (~0.8s) on the top-right HOLD EXIT button.
  */
 @Composable
@@ -240,238 +272,239 @@ fun MidiMonitorScreen(
 
     fun mappedCc(target: MidiControlTarget): Int = midiMappings[target] ?: target.defaultCc
 
-    // Build SMK-37 PRO faceplate slot models dynamically from live state & MIDI Learn mappings
     val mix = metronomeState.subdivisionMix
-
-    val modWheelFader = FaderSlotModel(
-        target = MidiControlTarget.ACCENT_LEVEL,
-        label = "Accent",
-        cc = mappedCc(MidiControlTarget.ACCENT_LEVEL),
-        level = mix.accent,
-        accentColor = WarmAmber
-    )
-
-    val rightFaders = listOf(
-        FaderSlotModel(
-            target = MidiControlTarget.QUARTER_LEVEL,
-            label = "1/4",
-            cc = mappedCc(MidiControlTarget.QUARTER_LEVEL),
-            level = mix.quarter,
-            accentColor = ElectricSky
-        ),
-        FaderSlotModel(
-            target = MidiControlTarget.EIGHTH_LEVEL,
-            label = "1/8",
-            cc = mappedCc(MidiControlTarget.EIGHTH_LEVEL),
-            level = mix.eighth,
-            accentColor = ElectricSky
-        ),
-        FaderSlotModel(
-            target = MidiControlTarget.TRIPLET_LEVEL,
-            label = "Trip",
-            cc = mappedCc(MidiControlTarget.TRIPLET_LEVEL),
-            level = mix.triplet,
-            accentColor = PitchEmerald
-        ),
-        FaderSlotModel(
-            target = MidiControlTarget.SIXTEENTH_LEVEL,
-            label = "1/16",
-            cc = mappedCc(MidiControlTarget.SIXTEENTH_LEVEL),
-            level = mix.sixteenth,
-            accentColor = ElectricSky
-        )
-    )
-
-    // 8 Rotary Knobs: K1 = Tempo BPM (48), K2 = Tone Vol (49), K3..K8 auto-populated from extra learned continuous CCs
-    val extraContinuousKnobs = buildList {
-        val metroVolCc = mappedCc(MidiControlTarget.METRONOME_VOLUME)
-        if (metroVolCc >= 0) {
-            add(
-                KnobSlotModel(
-                    target = MidiControlTarget.METRONOME_VOLUME,
-                    label = "Metro Vol",
-                    cc = metroVolCc,
-                    normalizedValue = metronomeState.metronomeGain,
-                    valueText = "${(metronomeState.metronomeGain * 100f).roundToInt()}%",
-                    accentColor = PitchEmerald
-                )
-            )
-        }
-        val meterTopCc = mappedCc(MidiControlTarget.METER_TOP_VALUE)
-        if (meterTopCc >= 0) {
-            val num = metronomeState.timeSignature.numerator
-            val norm = (num - TimeSignature.MIN_NUMERATOR).toFloat() /
-                (TimeSignature.MAX_NUMERATOR - TimeSignature.MIN_NUMERATOR).toFloat()
-            add(
-                KnobSlotModel(
-                    target = MidiControlTarget.METER_TOP_VALUE,
-                    label = "Meter Top",
-                    cc = meterTopCc,
-                    normalizedValue = norm,
-                    valueText = "$num",
-                    accentColor = WarmAmber
-                )
-            )
-        }
-        val meterBotCc = mappedCc(MidiControlTarget.METER_BOTTOM_VALUE)
-        if (meterBotCc >= 0) {
-            val allowed = TimeSignature.ALLOWED_DENOMINATORS
-            val den = metronomeState.timeSignature.denominator
-            val idx = allowed.indexOf(den).coerceAtLeast(0)
-            add(
-                KnobSlotModel(
-                    target = MidiControlTarget.METER_BOTTOM_VALUE,
-                    label = "Meter Bot",
-                    cc = meterBotCc,
-                    normalizedValue = idx.toFloat() / allowed.lastIndex.toFloat(),
-                    valueText = "/$den",
-                    accentColor = WarmAmber
-                )
-            )
-        }
-    }
-
-    val knobs = List(8) { index ->
-        when (index) {
-            0 -> KnobSlotModel(
-                target = MidiControlTarget.BPM,
-                label = "Tempo",
-                cc = mappedCc(MidiControlTarget.BPM),
-                normalizedValue = ((metronomeState.bpm - 32f) / (280f - 32f)).coerceIn(0f, 1f),
-                valueText = "${metronomeState.bpm}",
-                accentColor = if (metronomeState.isPlaying) PitchEmerald else ElectricSky
-            )
-            1 -> KnobSlotModel(
-                target = MidiControlTarget.TONE_VOLUME,
-                label = "Tone Vol",
-                cc = mappedCc(MidiControlTarget.TONE_VOLUME),
-                normalizedValue = harmonyState.toneGain.coerceIn(0f, 1f),
-                valueText = "${(harmonyState.toneGain * 100f).roundToInt()}%",
-                accentColor = ElectricSky
-            )
-            else -> extraContinuousKnobs.getOrNull(index - 2) ?: KnobSlotModel.empty(index + 1)
-        }
-    }
-
-    // Extra learned trigger pads automatically populate P4..P8 (and overflow into bottom P11..P15 if needed)
-    val extraTriggerPads = buildList {
-        val nextVoiceCc = mappedCc(MidiControlTarget.NEXT_TONE_VOICE)
-        if (nextVoiceCc >= 0) {
-            add(
-                PadSlotModel(
-                    target = MidiControlTarget.NEXT_TONE_VOICE,
-                    label = "Voice +",
-                    cc = nextVoiceCc,
-                    isToggle = false,
-                    isLit = false,
-                    litColor = ElectricSky
-                )
-            )
-        }
-        val nextClickCc = mappedCc(MidiControlTarget.NEXT_METRONOME_SOUND)
-        if (nextClickCc >= 0) {
-            add(
-                PadSlotModel(
-                    target = MidiControlTarget.NEXT_METRONOME_SOUND,
-                    label = "Click +",
-                    cc = nextClickCc,
-                    isToggle = false,
-                    isLit = false,
-                    litColor = WarmAmber
-                )
-            )
-        }
-        val meterTopStepCc = mappedCc(MidiControlTarget.METER_TOP_STEP)
-        if (meterTopStepCc >= 0) {
-            add(
-                PadSlotModel(
-                    target = MidiControlTarget.METER_TOP_STEP,
-                    label = "Top +1",
-                    cc = meterTopStepCc,
-                    isToggle = false,
-                    isLit = false,
-                    litColor = WarmAmber
-                )
-            )
-        }
-        val meterBotStepCc = mappedCc(MidiControlTarget.METER_BOTTOM_STEP)
-        if (meterBotStepCc >= 0) {
-            add(
-                PadSlotModel(
-                    target = MidiControlTarget.METER_BOTTOM_STEP,
-                    label = "Bot +",
-                    cc = meterBotStepCc,
-                    isToggle = false,
-                    isLit = false,
-                    litColor = WarmAmber
-                )
-            )
-        }
-    }
-
     val isPure = harmonyState.temperament == TemperamentMode.PURE
-    val topPads = List(8) { index ->
-        when (index) {
-            0 -> PadSlotModel(
-                target = MidiControlTarget.TOGGLE_METRONOME,
-                label = "Play/Stop",
-                cc = mappedCc(MidiControlTarget.TOGGLE_METRONOME),
-                isToggle = true,
-                isLit = metronomeState.isPlaying,
-                litColor = PitchEmerald,
-                statusTag = if (metronomeState.isPlaying) "ON" else "OFF"
-            )
-            1 -> PadSlotModel(
-                target = MidiControlTarget.TOGGLE_CHORD_HOLD,
-                label = "Hold",
-                cc = mappedCc(MidiControlTarget.TOGGLE_CHORD_HOLD),
-                isToggle = true,
-                isLit = harmonyState.chordHoldEnabled,
-                litColor = ElectricSky,
-                statusTag = if (harmonyState.chordHoldEnabled) "ON" else "OFF"
-            )
-            2 -> PadSlotModel(
-                target = MidiControlTarget.TOGGLE_TEMPERAMENT,
-                label = "Pure/Eq",
-                cc = mappedCc(MidiControlTarget.TOGGLE_TEMPERAMENT),
-                isToggle = true,
-                isLit = isPure,
-                litColor = PitchEmerald,
-                offAccentColor = WarmAmber,
-                statusTag = if (isPure) "PURE" else "EQ"
-            )
-            else -> extraTriggerPads.getOrNull(index - 3) ?: PadSlotModel.empty()
+
+    // Lookup active target bound to each physical SMK-37 PRO hardware CC number
+    val targetByCc = buildMap<Int, MidiControlTarget> {
+        MidiControlTarget.entries.forEach { target ->
+            val cc = mappedCc(target)
+            if (cc >= 0 && cc !in this) {
+                put(cc, target)
+            }
         }
     }
 
+    fun continuousNormalized(target: MidiControlTarget): Float = when (target) {
+        MidiControlTarget.BPM -> ((metronomeState.bpm - 32f) / (280f - 32f)).coerceIn(0f, 1f)
+        MidiControlTarget.TONE_VOLUME -> harmonyState.toneGain.coerceIn(0f, 1f)
+        MidiControlTarget.METRONOME_VOLUME -> metronomeState.metronomeGain.coerceIn(0f, 1f)
+        MidiControlTarget.ACCENT_LEVEL -> mix.accent.coerceIn(0f, 1f)
+        MidiControlTarget.QUARTER_LEVEL -> mix.quarter.coerceIn(0f, 1f)
+        MidiControlTarget.EIGHTH_LEVEL -> mix.eighth.coerceIn(0f, 1f)
+        MidiControlTarget.TRIPLET_LEVEL -> mix.triplet.coerceIn(0f, 1f)
+        MidiControlTarget.SIXTEENTH_LEVEL -> mix.sixteenth.coerceIn(0f, 1f)
+        MidiControlTarget.METER_TOP_VALUE -> (
+            (metronomeState.timeSignature.numerator - TimeSignature.MIN_NUMERATOR).toFloat() /
+                (TimeSignature.MAX_NUMERATOR - TimeSignature.MIN_NUMERATOR).toFloat()
+            ).coerceIn(0f, 1f)
+        MidiControlTarget.METER_BOTTOM_VALUE -> {
+            val allowed = TimeSignature.ALLOWED_DENOMINATORS
+            val idx = allowed.indexOf(metronomeState.timeSignature.denominator).coerceAtLeast(0)
+            (idx.toFloat() / allowed.lastIndex.toFloat()).coerceIn(0f, 1f)
+        }
+        else -> 0f
+    }
+
+    fun continuousLabel(target: MidiControlTarget): String = when (target) {
+        MidiControlTarget.BPM -> "Tempo"
+        MidiControlTarget.TONE_VOLUME -> "Tone Vol"
+        MidiControlTarget.METRONOME_VOLUME -> "Metro Vol"
+        MidiControlTarget.ACCENT_LEVEL -> "Accent"
+        MidiControlTarget.QUARTER_LEVEL -> "1/4"
+        MidiControlTarget.EIGHTH_LEVEL -> "1/8"
+        MidiControlTarget.TRIPLET_LEVEL -> "Trip"
+        MidiControlTarget.SIXTEENTH_LEVEL -> "1/16"
+        MidiControlTarget.METER_TOP_VALUE -> "Meter Top"
+        MidiControlTarget.METER_BOTTOM_VALUE -> "Meter Bot"
+        else -> target.label
+    }
+
+    fun continuousValueText(target: MidiControlTarget): String = when (target) {
+        MidiControlTarget.BPM -> "${metronomeState.bpm}"
+        MidiControlTarget.METER_TOP_VALUE -> "${metronomeState.timeSignature.numerator}"
+        MidiControlTarget.METER_BOTTOM_VALUE -> "/${metronomeState.timeSignature.denominator}"
+        else -> "${(continuousNormalized(target) * 100f).roundToInt()}%"
+    }
+
+    fun continuousAccent(target: MidiControlTarget): Color = when (target) {
+        MidiControlTarget.BPM -> if (metronomeState.isPlaying) PitchEmerald else ElectricSky
+        MidiControlTarget.METRONOME_VOLUME, MidiControlTarget.TRIPLET_LEVEL -> PitchEmerald
+        MidiControlTarget.ACCENT_LEVEL,
+        MidiControlTarget.METER_TOP_VALUE,
+        MidiControlTarget.METER_BOTTOM_VALUE -> WarmAmber
+        else -> ElectricSky
+    }
+
+    fun buildKnobModel(target: MidiControlTarget, cc: Int) = KnobSlotModel(
+        target = target,
+        label = continuousLabel(target),
+        cc = cc,
+        normalizedValue = continuousNormalized(target),
+        valueText = continuousValueText(target),
+        accentColor = continuousAccent(target)
+    )
+
+    fun buildFaderModel(slotCc: Int): FaderSlotModel {
+        val target = targetByCc[slotCc]
+        if (target == null || target.isTrigger) return FaderSlotModel.empty(slotCc)
+        return FaderSlotModel(
+            target = target,
+            label = continuousLabel(target),
+            cc = slotCc,
+            level = continuousNormalized(target),
+            accentColor = continuousAccent(target)
+        )
+    }
+
+    fun buildPadModel(target: MidiControlTarget, cc: Int): PadSlotModel = when (target) {
+        MidiControlTarget.TOGGLE_METRONOME -> PadSlotModel(
+            target = target,
+            label = "Play/Stop",
+            cc = cc,
+            isToggle = true,
+            isLit = metronomeState.isPlaying,
+            litColor = PitchEmerald,
+            statusTag = if (metronomeState.isPlaying) "ON" else "OFF"
+        )
+        MidiControlTarget.TOGGLE_CHORD_HOLD -> PadSlotModel(
+            target = target,
+            label = "Hold",
+            cc = cc,
+            isToggle = true,
+            isLit = harmonyState.chordHoldEnabled,
+            litColor = ElectricSky,
+            statusTag = if (harmonyState.chordHoldEnabled) "ON" else "OFF"
+        )
+        MidiControlTarget.TOGGLE_TEMPERAMENT -> PadSlotModel(
+            target = target,
+            label = "Pure/Eq",
+            cc = cc,
+            isToggle = true,
+            isLit = isPure,
+            litColor = PitchEmerald,
+            offAccentColor = WarmAmber,
+            statusTag = if (isPure) "PURE" else "EQ"
+        )
+        MidiControlTarget.TAP_TEMPO -> PadSlotModel(
+            target = target,
+            label = "Tap",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = WarmAmber
+        )
+        MidiControlTarget.CLEAR_HELD -> PadSlotModel(
+            target = target,
+            label = "Clear",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = ElectricSky
+        )
+        MidiControlTarget.MUTE_ALL -> PadSlotModel(
+            target = target,
+            label = "All Off",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = DownbeatCrimson,
+            offAccentColor = DownbeatCrimson
+        )
+        MidiControlTarget.NEXT_TONE_VOICE -> PadSlotModel(
+            target = target,
+            label = "Voice",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = ElectricSky,
+            statusTag = voiceShortTag(harmonyState.voice)
+        )
+        MidiControlTarget.NEXT_METRONOME_SOUND -> PadSlotModel(
+            target = target,
+            label = "Click",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = WarmAmber,
+            statusTag = clickShortTag(metronomeState.metronomeSound)
+        )
+        MidiControlTarget.METER_TOP_STEP -> PadSlotModel(
+            target = target,
+            label = "Top +1",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = WarmAmber
+        )
+        MidiControlTarget.METER_BOTTOM_STEP -> PadSlotModel(
+            target = target,
+            label = "Bot +",
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = WarmAmber
+        )
+        else -> PadSlotModel(
+            target = target,
+            label = target.label,
+            cc = cc,
+            isToggle = false,
+            isLit = false,
+            litColor = ElectricSky
+        )
+    }
+
+    // Physical Mod Wheel (CC #1) & 4 Right Faders (CC #64..#67)
+    val modWheelFader = buildFaderModel(1)
+    val rightFaders = listOf(64, 65, 66, 67).map { buildFaderModel(it) }
+
+    // Physical 8 Rotary Knobs (CC #48..#55) + fallback slots for any continuous target mapped outside standard CCs
+    val standardContinuousCcs = setOf(1, 48, 49, 50, 51, 52, 53, 54, 55, 64, 65, 66, 67)
+    val customContinuousQueue = ArrayDeque(
+        MidiControlTarget.entries
+            .filter { !it.isTrigger }
+            .mapNotNull { t ->
+                val cc = mappedCc(t)
+                if (cc >= 0 && cc !in standardContinuousCcs) buildKnobModel(t, cc) else null
+            }
+    )
+    val knobs = List(8) { index ->
+        val slotCc = 48 + index
+        val bound = targetByCc[slotCc]
+        when {
+            bound != null && !bound.isTrigger -> buildKnobModel(bound, slotCc)
+            customContinuousQueue.isNotEmpty() -> customContinuousQueue.removeFirst()
+            else -> KnobSlotModel.empty(index + 1)
+        }
+    }
+
+    // Physical 16 Pads: Top Row (CC #40..#47), Bottom Row (CC #32..#39) + fallback for custom trigger CCs
+    val standardPadCcs = (32..47).toSet()
+    val customTriggerQueue = ArrayDeque(
+        MidiControlTarget.entries
+            .filter { it.isTrigger }
+            .mapNotNull { t ->
+                val cc = mappedCc(t)
+                if (cc >= 0 && cc !in standardPadCcs) buildPadModel(t, cc) else null
+            }
+    )
+    val topPads = List(8) { index ->
+        val slotCc = 40 + index
+        val bound = targetByCc[slotCc]
+        when {
+            bound != null && bound.isTrigger -> buildPadModel(bound, slotCc)
+            customTriggerQueue.isNotEmpty() -> customTriggerQueue.removeFirst()
+            else -> PadSlotModel.empty()
+        }
+    }
     val bottomPads = List(8) { index ->
-        when (index) {
-            0 -> PadSlotModel(
-                target = MidiControlTarget.TAP_TEMPO,
-                label = "Tap",
-                cc = mappedCc(MidiControlTarget.TAP_TEMPO),
-                isToggle = false,
-                isLit = false,
-                litColor = WarmAmber
-            )
-            1 -> PadSlotModel(
-                target = MidiControlTarget.CLEAR_HELD,
-                label = "Clear",
-                cc = mappedCc(MidiControlTarget.CLEAR_HELD),
-                isToggle = false,
-                isLit = false,
-                litColor = ElectricSky
-            )
-            7 -> PadSlotModel(
-                target = MidiControlTarget.MUTE_ALL,
-                label = "All Off",
-                cc = mappedCc(MidiControlTarget.MUTE_ALL),
-                isToggle = false,
-                isLit = false,
-                litColor = DownbeatCrimson,
-                offAccentColor = DownbeatCrimson
-            )
-            else -> extraTriggerPads.getOrNull(5 + (index - 2)) ?: PadSlotModel.empty()
+        val slotCc = 32 + index
+        val bound = targetByCc[slotCc]
+        when {
+            bound != null && bound.isTrigger -> buildPadModel(bound, slotCc)
+            customTriggerQueue.isNotEmpty() -> customTriggerQueue.removeFirst()
+            else -> PadSlotModel.empty()
         }
     }
 
@@ -529,7 +562,7 @@ fun MidiMonitorScreen(
                         ) {
                             HardwareFaderSlot(
                                 model = modWheelFader,
-                                isPulsing = pulsedTarget == modWheelFader.target,
+                                isPulsing = modWheelFader.target != null && pulsedTarget == modWheelFader.target,
                                 isCompactHeight = isCompactHeight,
                                 modifier = Modifier
                                     .weight(1.55f)
@@ -544,14 +577,14 @@ fun MidiMonitorScreen(
                             )
                         }
 
-                        // Center 8-Column Matrix: 8 Rotary Knobs + 8 Top Pads + 8 Bottom Pads
+                        // Center 8-Column Matrix: 8 Rotary Knobs (48..55) + 8 Top Pads (40..47) + 8 Bottom Pads (32..39)
                         Column(
                             modifier = Modifier
                                 .weight(7.15f)
                                 .fillMaxHeight(),
                             verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 3.dp else 6.dp)
                         ) {
-                            // Row 1: 8 Rotary Knobs
+                            // Row 1: 8 Rotary Knobs (48..55)
                             Row(
                                 modifier = Modifier
                                     .weight(1.08f)
@@ -570,7 +603,7 @@ fun MidiMonitorScreen(
                                 }
                             }
 
-                            // Row 2: Top 8 Pads (40, 41, 42 + 5 future/learned slots)
+                            // Row 2: Top 8 Pads (40..47)
                             Row(
                                 modifier = Modifier
                                     .weight(1f)
@@ -589,7 +622,7 @@ fun MidiMonitorScreen(
                                 }
                             }
 
-                            // Row 3: Bottom 8 Pads (36, 37 + 5 future slots + 47)
+                            // Row 3: Bottom 8 Pads (32..39)
                             Row(
                                 modifier = Modifier
                                     .weight(1f)
@@ -625,7 +658,7 @@ fun MidiMonitorScreen(
                                 rightFaders.forEach { fader ->
                                     HardwareFaderSlot(
                                         model = fader,
-                                        isPulsing = pulsedTarget == fader.target,
+                                        isPulsing = fader.target != null && pulsedTarget == fader.target,
                                         isCompactHeight = isCompactHeight,
                                         modifier = Modifier
                                             .weight(1f)
@@ -1164,9 +1197,10 @@ private fun HardwareFaderSlot(
         label = "fader_level_${model.label}"
     )
     val percent = (clamped * 100f).roundToInt()
-    val isActive = clamped > 0.005f
+    val isActive = model.isAssigned && clamped > 0.005f
     val borderColor by animateColorAsState(
         targetValue = when {
+            !model.isAssigned -> HardwareBorder.copy(alpha = 0.42f)
             isPulsing -> CrispOffWhite
             isActive -> model.accentColor.copy(alpha = 0.55f)
             else -> HardwareBorder.copy(alpha = 0.7f)
@@ -1191,7 +1225,7 @@ private fun HardwareFaderSlot(
                     fontFamily = JetBrainsMonoFontFamily,
                     fontWeight = FontWeight.Bold,
                     fontSize = if (isCompactHeight) 8.sp else 10.sp,
-                    color = PitchEmerald,
+                    color = if (model.isAssigned) PitchEmerald else MutedSlateText.copy(alpha = 0.4f),
                     maxLines = 1
                 )
             }
@@ -1200,7 +1234,11 @@ private fun HardwareFaderSlot(
                 fontFamily = SpaceGroteskFontFamily,
                 fontWeight = FontWeight.Bold,
                 fontSize = if (isCompactHeight) 8.sp else 10.sp,
-                color = if (isPulsing) CrispOffWhite else if (isActive) CrispOffWhite else MutedSlateText,
+                color = when {
+                    !model.isAssigned -> MutedSlateText.copy(alpha = 0.4f)
+                    isPulsing || isActive -> CrispOffWhite
+                    else -> MutedSlateText
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1211,7 +1249,7 @@ private fun HardwareFaderSlot(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            color = LcdMidnight,
+            color = if (model.isAssigned) LcdMidnight else StudioCharcoal.copy(alpha = 0.65f),
             shape = RoundedCornerShape(6.dp),
             border = BorderStroke(if (isPulsing) 1.5.dp else 1.dp, borderColor)
         ) {
@@ -1257,7 +1295,7 @@ private fun HardwareFaderSlot(
                 )
 
                 // Glowing active level bar inside slot
-                if (animatedLevel > 0.005f) {
+                if (model.isAssigned && animatedLevel > 0.005f) {
                     drawRoundRect(
                         color = model.accentColor,
                         topLeft = Offset(centerX - slotW / 2f, thumbY),
@@ -1286,12 +1324,12 @@ private fun HardwareFaderSlot(
 
         // Percentage readout
         Text(
-            text = "$percent%",
+            text = if (model.isAssigned) "$percent%" else "—",
             fontFamily = JetBrainsMonoFontFamily,
             fontWeight = FontWeight.Bold,
             fontSize = if (isCompactHeight) 8.sp else 10.sp,
             lineHeight = if (isCompactHeight) 9.sp else 11.sp,
-            color = if (isActive) model.accentColor else MutedSlateText.copy(alpha = 0.55f),
+            color = if (isActive) model.accentColor else MutedSlateText.copy(alpha = 0.5f),
             maxLines = 1
         )
     }

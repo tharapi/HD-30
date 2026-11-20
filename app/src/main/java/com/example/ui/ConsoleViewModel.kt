@@ -78,19 +78,19 @@ enum class MidiControlTarget(
     EIGHTH_LEVEL("1/8 Beat", 65, false),
     TRIPLET_LEVEL("Triplet", 66, false),
     SIXTEENTH_LEVEL("1/16 Beat", 67, false),
-    TAP_TEMPO("Tap Tempo", 36, true),
-    CLEAR_HELD("Clear Held", 37, true),
+    TAP_TEMPO("Tap Tempo", 32, true),
+    CLEAR_HELD("Clear Held", 33, true),
     TOGGLE_METRONOME("Play/Stop", 40, true),
     TOGGLE_CHORD_HOLD("Chord Hold", 41, true),
-    TOGGLE_TEMPERAMENT("Equal / Pure", 42, true),
-    MUTE_ALL("All Sound Off", 47, true),
-    METER_TOP_VALUE("Meter Top (1-16)", -1, false),
-    METER_BOTTOM_VALUE("Meter Bottom", -1, false),
+    TOGGLE_TEMPERAMENT("Equal / Pure", 47, true),
+    MUTE_ALL("All Sound Off", 39, true),
+    METER_TOP_VALUE("Meter Top (1-16)", 50, false),
+    METER_BOTTOM_VALUE("Meter Bottom", 51, false),
     METER_TOP_STEP("Meter Top +1", -1, true),
     METER_BOTTOM_STEP("Meter Bottom Step", -1, true),
     METRONOME_VOLUME("Metro Vol", -1, false),
-    NEXT_TONE_VOICE("Next Voice", -1, true),
-    NEXT_METRONOME_SOUND("Next Click", -1, true)
+    NEXT_TONE_VOICE("Next Voice", 46, true),
+    NEXT_METRONOME_SOUND("Next Click", 38, true)
 }
 
 data class MidiControlPulse(
