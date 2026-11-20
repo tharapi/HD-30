@@ -489,6 +489,7 @@ fun MidiMonitorScreen(
         ) {
             val isCompactHeight = maxHeight < 430.dp
             val isWideScreen = maxWidth >= 880.dp
+            val showLastEvent = maxWidth >= 580.dp
             val gap = if (isCompactHeight) 5.dp else 8.dp
 
             Column(
@@ -500,7 +501,7 @@ fun MidiMonitorScreen(
                     midiState = midiState,
                     audioOutputMode = audioOutputMode,
                     isCompactHeight = isCompactHeight,
-                    showLastEvent = maxWidth >= 580.dp,
+                    showLastEvent = showLastEvent,
                     onExitMonitor = onExitMonitor
                 )
 
