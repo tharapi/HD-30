@@ -1,5 +1,9 @@
 package com.example.ui.components
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -7,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -21,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -32,7 +38,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.Piano
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -54,8 +59,11 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
@@ -75,16 +83,22 @@ import com.example.model.AudioOutputMode
 import com.example.model.NotePitchInfo
 import com.example.model.PitchTheory
 import com.example.model.TemperamentMode
+import com.example.model.TimeSignature
 import com.example.ui.HarmonyUiState
 import com.example.ui.MetronomeUiState
+import com.example.ui.MidiControlPulse
+import com.example.ui.MidiControlTarget
 import com.example.ui.theme.AnodizedSlate
 import com.example.ui.theme.ConsoleSurface
 import com.example.ui.theme.ConsoleSurfaceBright
 import com.example.ui.theme.CrispOffWhite
 import com.example.ui.theme.DownbeatCrimson
+import com.example.ui.theme.EbonyKey
 import com.example.ui.theme.ElectricSky
 import com.example.ui.theme.ElectricSkyContainer
 import com.example.ui.theme.HardwareBorder
+import com.example.ui.theme.IvoryKey
+import com.example.ui.theme.IvoryKeyPressed
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LcdBorder
 import com.example.ui.theme.LcdMidnight
@@ -97,13 +111,85 @@ import com.example.ui.theme.WarmAmberContainer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
+
+// Dedicated zone accents matching the user's SMK-37 PRO blueprint
+private val MetronomeYellowBorder = Color(0xFFFACC15)
+private val MetronomePurpleBorder = Color(0xFFA855F7)
+private val KeyboardRedBorder = Color(0xFFEF4444)
+private val HarmonyGreenBorder = Color(0xFF10B981)
+
+private data class KnobSlotModel(
+    val target: MidiControlTarget?,
+    val label: String,
+    val cc: Int,
+    val normalizedValue: Float,
+    val valueText: String,
+    val accentColor: Color
+) {
+    val isAssigned: Boolean get() = target != null && cc >= 0
+
+    companion object {
+        fun empty(slotNumber: Int) = KnobSlotModel(
+            target = null,
+            label = "K$slotNumber",
+            cc = -1,
+            normalizedValue = 0f,
+            valueText = "",
+            accentColor = HardwareBorder
+        )
+    }
+}
+
+private data class PadSlotModel(
+    val target: MidiControlTarget?,
+    val label: String,
+    val cc: Int,
+    val isToggle: Boolean,
+    val isLit: Boolean,
+    val litColor: Color,
+    val offAccentColor: Color? = null,
+    val statusTag: String? = null
+) {
+    val isAssigned: Boolean get() = target != null && cc >= 0
+
+    companion object {
+        fun empty() = PadSlotModel(
+            target = null,
+            label = "",
+            cc = -1,
+            isToggle = false,
+            isLit = false,
+            litColor = HardwareBorder
+        )
+    }
+}
+
+private data class FaderSlotModel(
+    val target: MidiControlTarget,
+    val label: String,
+    val cc: Int,
+    val level: Float,
+    val accentColor: Color
+)
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 /**
- * Dedicated full-screen, zero-scroll, touch-locked MIDI Keyboard Monitor Mode.
- * Displays all Harmony, Metronome, Held Keys, Audio Output, and Mixer levels at a glance
- * without any interactive controls or virtual keyboard. Exits only via press-and-hold unlock.
+ * Full-screen, zero-scroll, touch-locked SMK-37 PRO hardware-faceplate MIDI Monitor Mode.
+ * - Locks orientation to landscape while active and restores user orientation on exit.
+ * - Keeps screen awake automatically and blocks Back gestures.
+ * - Mirrors the exact M-VAVE SMK-37 PRO control layout (Mod Wheel CC #1, 8 Knobs, 16 Pads,
+ *   4 Faders, Yellow & Purple Metronome zones, Red 37-key Read-Only Keyboard, Green Harmony zone).
+ * - Exits ONLY via press-and-hold (~0.8s) on the top-right HOLD EXIT button.
  */
 @Composable
 fun MidiMonitorScreen(
@@ -111,12 +197,26 @@ fun MidiMonitorScreen(
     metronomeState: MetronomeUiState,
     beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
     midiState: MidiConnectionUiState,
+    midiMappings: Map<MidiControlTarget, Int>,
+    lastControlPulse: MidiControlPulse,
     sustainPedalDown: Boolean,
     audioOutputMode: AudioOutputMode,
     onExitMonitor: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Keep screen awake automatically while monitoring on a music stand
+    // Auto-lock landscape while in Monitor Mode without triggering a flip-flop on config change
+    val context = LocalContext.current
+    DisposableEffect(context) {
+        val activity = context.findActivity()
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        onDispose {
+            if (activity != null && !activity.isChangingConfigurations) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
+    }
+
+    // Keep screen awake automatically on music stand
     val view = LocalView.current
     DisposableEffect(view) {
         val previousKeepScreenOn = view.keepScreenOn
@@ -126,8 +226,254 @@ fun MidiMonitorScreen(
         }
     }
 
-    // Ignore accidental hardware/gesture Back navigation while locked in Monitor Mode
+    // Block accidental hardware/gesture Back navigation while locked
     BackHandler(enabled = true) {}
+
+    // Brief visual flash (~280ms) on whichever knob, pad, or fader just received MIDI CC
+    var pulsedTarget by remember { mutableStateOf<MidiControlTarget?>(null) }
+    LaunchedEffect(lastControlPulse.seq) {
+        if (lastControlPulse.seq == 0L) return@LaunchedEffect
+        pulsedTarget = lastControlPulse.target
+        delay(280L)
+        pulsedTarget = null
+    }
+
+    fun mappedCc(target: MidiControlTarget): Int = midiMappings[target] ?: target.defaultCc
+
+    // Build SMK-37 PRO faceplate slot models dynamically from live state & MIDI Learn mappings
+    val mix = metronomeState.subdivisionMix
+
+    val modWheelFader = FaderSlotModel(
+        target = MidiControlTarget.ACCENT_LEVEL,
+        label = "Accent",
+        cc = mappedCc(MidiControlTarget.ACCENT_LEVEL),
+        level = mix.accent,
+        accentColor = WarmAmber
+    )
+
+    val rightFaders = listOf(
+        FaderSlotModel(
+            target = MidiControlTarget.QUARTER_LEVEL,
+            label = "1/4",
+            cc = mappedCc(MidiControlTarget.QUARTER_LEVEL),
+            level = mix.quarter,
+            accentColor = ElectricSky
+        ),
+        FaderSlotModel(
+            target = MidiControlTarget.EIGHTH_LEVEL,
+            label = "1/8",
+            cc = mappedCc(MidiControlTarget.EIGHTH_LEVEL),
+            level = mix.eighth,
+            accentColor = ElectricSky
+        ),
+        FaderSlotModel(
+            target = MidiControlTarget.TRIPLET_LEVEL,
+            label = "Trip",
+            cc = mappedCc(MidiControlTarget.TRIPLET_LEVEL),
+            level = mix.triplet,
+            accentColor = PitchEmerald
+        ),
+        FaderSlotModel(
+            target = MidiControlTarget.SIXTEENTH_LEVEL,
+            label = "1/16",
+            cc = mappedCc(MidiControlTarget.SIXTEENTH_LEVEL),
+            level = mix.sixteenth,
+            accentColor = ElectricSky
+        )
+    )
+
+    // 8 Rotary Knobs: K1 = Tempo BPM (48), K2 = Tone Vol (49), K3..K8 auto-populated from extra learned continuous CCs
+    val extraContinuousKnobs = buildList {
+        val metroVolCc = mappedCc(MidiControlTarget.METRONOME_VOLUME)
+        if (metroVolCc >= 0) {
+            add(
+                KnobSlotModel(
+                    target = MidiControlTarget.METRONOME_VOLUME,
+                    label = "Metro Vol",
+                    cc = metroVolCc,
+                    normalizedValue = metronomeState.metronomeGain,
+                    valueText = "${(metronomeState.metronomeGain * 100f).roundToInt()}%",
+                    accentColor = PitchEmerald
+                )
+            )
+        }
+        val meterTopCc = mappedCc(MidiControlTarget.METER_TOP_VALUE)
+        if (meterTopCc >= 0) {
+            val num = metronomeState.timeSignature.numerator
+            val norm = (num - TimeSignature.MIN_NUMERATOR).toFloat() /
+                (TimeSignature.MAX_NUMERATOR - TimeSignature.MIN_NUMERATOR).toFloat()
+            add(
+                KnobSlotModel(
+                    target = MidiControlTarget.METER_TOP_VALUE,
+                    label = "Meter Top",
+                    cc = meterTopCc,
+                    normalizedValue = norm,
+                    valueText = "$num",
+                    accentColor = WarmAmber
+                )
+            )
+        }
+        val meterBotCc = mappedCc(MidiControlTarget.METER_BOTTOM_VALUE)
+        if (meterBotCc >= 0) {
+            val allowed = TimeSignature.ALLOWED_DENOMINATORS
+            val den = metronomeState.timeSignature.denominator
+            val idx = allowed.indexOf(den).coerceAtLeast(0)
+            add(
+                KnobSlotModel(
+                    target = MidiControlTarget.METER_BOTTOM_VALUE,
+                    label = "Meter Bot",
+                    cc = meterBotCc,
+                    normalizedValue = idx.toFloat() / allowed.lastIndex.toFloat(),
+                    valueText = "/$den",
+                    accentColor = WarmAmber
+                )
+            )
+        }
+    }
+
+    val knobs = List(8) { index ->
+        when (index) {
+            0 -> KnobSlotModel(
+                target = MidiControlTarget.BPM,
+                label = "Tempo",
+                cc = mappedCc(MidiControlTarget.BPM),
+                normalizedValue = ((metronomeState.bpm - 32f) / (280f - 32f)).coerceIn(0f, 1f),
+                valueText = "${metronomeState.bpm}",
+                accentColor = if (metronomeState.isPlaying) PitchEmerald else ElectricSky
+            )
+            1 -> KnobSlotModel(
+                target = MidiControlTarget.TONE_VOLUME,
+                label = "Tone Vol",
+                cc = mappedCc(MidiControlTarget.TONE_VOLUME),
+                normalizedValue = harmonyState.toneGain.coerceIn(0f, 1f),
+                valueText = "${(harmonyState.toneGain * 100f).roundToInt()}%",
+                accentColor = ElectricSky
+            )
+            else -> extraContinuousKnobs.getOrNull(index - 2) ?: KnobSlotModel.empty(index + 1)
+        }
+    }
+
+    // Extra learned trigger pads automatically populate P4..P8 (and overflow into bottom P11..P15 if needed)
+    val extraTriggerPads = buildList {
+        val nextVoiceCc = mappedCc(MidiControlTarget.NEXT_TONE_VOICE)
+        if (nextVoiceCc >= 0) {
+            add(
+                PadSlotModel(
+                    target = MidiControlTarget.NEXT_TONE_VOICE,
+                    label = "Voice +",
+                    cc = nextVoiceCc,
+                    isToggle = false,
+                    isLit = false,
+                    litColor = ElectricSky
+                )
+            )
+        }
+        val nextClickCc = mappedCc(MidiControlTarget.NEXT_METRONOME_SOUND)
+        if (nextClickCc >= 0) {
+            add(
+                PadSlotModel(
+                    target = MidiControlTarget.NEXT_METRONOME_SOUND,
+                    label = "Click +",
+                    cc = nextClickCc,
+                    isToggle = false,
+                    isLit = false,
+                    litColor = WarmAmber
+                )
+            )
+        }
+        val meterTopStepCc = mappedCc(MidiControlTarget.METER_TOP_STEP)
+        if (meterTopStepCc >= 0) {
+            add(
+                PadSlotModel(
+                    target = MidiControlTarget.METER_TOP_STEP,
+                    label = "Top +1",
+                    cc = meterTopStepCc,
+                    isToggle = false,
+                    isLit = false,
+                    litColor = WarmAmber
+                )
+            )
+        }
+        val meterBotStepCc = mappedCc(MidiControlTarget.METER_BOTTOM_STEP)
+        if (meterBotStepCc >= 0) {
+            add(
+                PadSlotModel(
+                    target = MidiControlTarget.METER_BOTTOM_STEP,
+                    label = "Bot +",
+                    cc = meterBotStepCc,
+                    isToggle = false,
+                    isLit = false,
+                    litColor = WarmAmber
+                )
+            )
+        }
+    }
+
+    val isPure = harmonyState.temperament == TemperamentMode.PURE
+    val topPads = List(8) { index ->
+        when (index) {
+            0 -> PadSlotModel(
+                target = MidiControlTarget.TOGGLE_METRONOME,
+                label = "Play/Stop",
+                cc = mappedCc(MidiControlTarget.TOGGLE_METRONOME),
+                isToggle = true,
+                isLit = metronomeState.isPlaying,
+                litColor = PitchEmerald,
+                statusTag = if (metronomeState.isPlaying) "ON" else "OFF"
+            )
+            1 -> PadSlotModel(
+                target = MidiControlTarget.TOGGLE_CHORD_HOLD,
+                label = "Hold",
+                cc = mappedCc(MidiControlTarget.TOGGLE_CHORD_HOLD),
+                isToggle = true,
+                isLit = harmonyState.chordHoldEnabled,
+                litColor = ElectricSky,
+                statusTag = if (harmonyState.chordHoldEnabled) "ON" else "OFF"
+            )
+            2 -> PadSlotModel(
+                target = MidiControlTarget.TOGGLE_TEMPERAMENT,
+                label = "Pure/Eq",
+                cc = mappedCc(MidiControlTarget.TOGGLE_TEMPERAMENT),
+                isToggle = true,
+                isLit = isPure,
+                litColor = PitchEmerald,
+                offAccentColor = WarmAmber,
+                statusTag = if (isPure) "PURE" else "EQ"
+            )
+            else -> extraTriggerPads.getOrNull(index - 3) ?: PadSlotModel.empty()
+        }
+    }
+
+    val bottomPads = List(8) { index ->
+        when (index) {
+            0 -> PadSlotModel(
+                target = MidiControlTarget.TAP_TEMPO,
+                label = "Tap",
+                cc = mappedCc(MidiControlTarget.TAP_TEMPO),
+                isToggle = false,
+                isLit = false,
+                litColor = WarmAmber
+            )
+            1 -> PadSlotModel(
+                target = MidiControlTarget.CLEAR_HELD,
+                label = "Clear",
+                cc = mappedCc(MidiControlTarget.CLEAR_HELD),
+                isToggle = false,
+                isLit = false,
+                litColor = ElectricSky
+            )
+            7 -> PadSlotModel(
+                target = MidiControlTarget.MUTE_ALL,
+                label = "All Off",
+                cc = mappedCc(MidiControlTarget.MUTE_ALL),
+                isToggle = false,
+                isLit = false,
+                litColor = DownbeatCrimson,
+                offAccentColor = DownbeatCrimson
+            )
+            else -> extraTriggerPads.getOrNull(5 + (index - 2)) ?: PadSlotModel.empty()
+        }
+    }
 
     Surface(
         modifier = modifier
@@ -139,141 +485,191 @@ fun MidiMonitorScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(horizontal = 8.dp, vertical = 5.dp)
         ) {
-            val isLandscape = maxWidth > maxHeight || maxWidth >= 700.dp
-            val isCompactHeight = maxHeight < 460.dp
-            val isCompactWidth = maxWidth < 400.dp
-            val sectionGap = if (isCompactHeight) 6.dp else 8.dp
+            val isCompactHeight = maxHeight < 430.dp
+            val isWideScreen = maxWidth >= 880.dp
+            val gap = if (isCompactHeight) 5.dp else 8.dp
 
             Column(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(sectionGap)
+                verticalArrangement = Arrangement.spacedBy(gap)
             ) {
+                // 1. Slim Top Lock & MIDI Telemetry Bar
                 MonitorTopBar(
                     midiState = midiState,
                     audioOutputMode = audioOutputMode,
-                    showOutputBadge = isLandscape,
                     isCompactHeight = isCompactHeight,
-                    isCompactWidth = isCompactWidth,
+                    showLastEvent = maxWidth >= 580.dp,
                     onExitMonitor = onExitMonitor
                 )
 
-                if (isLandscape) {
+                // 2. TOP DECK: SMK-37 PRO Hardware Faceplate (Mod Wheel + Yellow | 8x3 Knobs & Pads | 4 Faders + Purple)
+                Surface(
+                    modifier = Modifier
+                        .weight(1.24f)
+                        .fillMaxWidth(),
+                    color = AnodizedSlate,
+                    shape = MaterialTheme.shapes.medium,
+                    border = BorderStroke(1.2.dp, HardwareBorder)
+                ) {
                     Row(
                         modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(sectionGap)
+                            .fillMaxSize()
+                            .padding(horizontal = if (isCompactHeight) 6.dp else 10.dp, vertical = if (isCompactHeight) 5.dp else 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (isCompactHeight) 6.dp else 10.dp)
                     ) {
+                        // Far-Left Column: Mod Wheel CC #1 (Top) + Yellow Metronome Primary Box (Bottom)
                         Column(
                             modifier = Modifier
-                                .weight(1.1f)
+                                .weight(1.30f)
                                 .fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(sectionGap)
+                            verticalArrangement = Arrangement.spacedBy(gap)
                         ) {
-                            HarmonyMonitorCard(
-                                harmonyState = harmonyState,
-                                sustainPedalDown = sustainPedalDown,
+                            HardwareFaderSlot(
+                                model = modWheelFader,
+                                isPulsing = pulsedTarget == modWheelFader.target,
                                 isCompactHeight = isCompactHeight,
-                                isLandscape = true,
                                 modifier = Modifier
-                                    .weight(1.1f)
+                                    .weight(1.55f)
                                     .fillMaxWidth()
                             )
-                            HeldKeysMonitorCard(
-                                harmonyState = harmonyState,
-                                isLandscape = true,
+                            MetronomeYellowBox(
+                                metronomeState = metronomeState,
                                 isCompactHeight = isCompactHeight,
                                 modifier = Modifier
-                                    .weight(1.0f)
+                                    .weight(1.05f)
                                     .fillMaxWidth()
                             )
                         }
 
+                        // Center 8-Column Matrix: 8 Rotary Knobs + 8 Top Pads + 8 Bottom Pads
                         Column(
                             modifier = Modifier
-                                .weight(1.05f)
+                                .weight(7.15f)
                                 .fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(sectionGap)
+                            verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 3.dp else 6.dp)
                         ) {
-                            MetronomeMonitorCard(
+                            // Row 1: 8 Rotary Knobs
+                            Row(
+                                modifier = Modifier
+                                    .weight(1.08f)
+                                    .fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(if (isCompactHeight) 4.dp else 6.dp)
+                            ) {
+                                knobs.forEach { knob ->
+                                    HardwareKnobSlot(
+                                        model = knob,
+                                        isPulsing = knob.target != null && pulsedTarget == knob.target,
+                                        isCompactHeight = isCompactHeight,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
+                            }
+
+                            // Row 2: Top 8 Pads (40, 41, 42 + 5 future/learned slots)
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(if (isCompactHeight) 4.dp else 6.dp)
+                            ) {
+                                topPads.forEach { pad ->
+                                    HardwarePadSlot(
+                                        model = pad,
+                                        isPulsing = pad.target != null && pulsedTarget == pad.target,
+                                        isCompactHeight = isCompactHeight,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
+                            }
+
+                            // Row 3: Bottom 8 Pads (36, 37 + 5 future slots + 47)
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(if (isCompactHeight) 4.dp else 6.dp)
+                            ) {
+                                bottomPads.forEach { pad ->
+                                    HardwarePadSlot(
+                                        model = pad,
+                                        isPulsing = pad.target != null && pulsedTarget == pad.target,
+                                        isCompactHeight = isCompactHeight,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
+                            }
+                        }
+
+                        // Far-Right Block: 4 Vertical Faders (64..67) + Purple Metronome Status Box
+                        Column(
+                            modifier = Modifier
+                                .weight(3.55f)
+                                .fillMaxHeight(),
+                            verticalArrangement = Arrangement.spacedBy(gap)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .weight(1.55f)
+                                    .fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(if (isCompactHeight) 4.dp else 6.dp)
+                            ) {
+                                rightFaders.forEach { fader ->
+                                    HardwareFaderSlot(
+                                        model = fader,
+                                        isPulsing = pulsedTarget == fader.target,
+                                        isCompactHeight = isCompactHeight,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
+                            }
+
+                            MetronomePurpleBox(
                                 metronomeState = metronomeState,
                                 beatSnapshotFlow = beatSnapshotFlow,
                                 isCompactHeight = isCompactHeight,
-                                isLandscape = true,
                                 modifier = Modifier
-                                    .weight(1.02f)
-                                    .fillMaxWidth()
-                            )
-                            LevelsMonitorCard(
-                                harmonyState = harmonyState,
-                                metronomeState = metronomeState,
-                                audioOutputMode = audioOutputMode,
-                                showOutputBadge = false,
-                                isCompactHeight = isCompactHeight,
-                                modifier = Modifier
-                                    .weight(1.08f)
+                                    .weight(1.05f)
                                     .fillMaxWidth()
                             )
                         }
                     }
-                } else {
-                    // Portrait zero-scroll layout:
-                    // Row 1: Harmony + Tempo hero split
-                    Row(
-                        modifier = Modifier
-                            .weight(1.32f)
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(sectionGap)
-                    ) {
-                        HarmonyMonitorCard(
-                            harmonyState = harmonyState,
-                            sustainPedalDown = sustainPedalDown,
-                            isCompactHeight = false,
-                            isLandscape = false,
-                            modifier = Modifier
-                                .weight(1.12f)
-                                .fillMaxHeight()
-                        )
-                        MetronomeMonitorCard(
-                            metronomeState = metronomeState,
-                            beatSnapshotFlow = beatSnapshotFlow,
-                            isCompactHeight = false,
-                            isLandscape = false,
-                            modifier = Modifier
-                                .weight(1.0f)
-                                .fillMaxHeight()
-                        )
-                    }
-
-                    // Row 2: Active Held Keys (no virtual keyboard)
-                    HeldKeysMonitorCard(
-                        harmonyState = harmonyState,
-                        isLandscape = false,
-                        isCompactHeight = false,
-                        modifier = Modifier
-                            .weight(1.0f)
-                            .fillMaxWidth()
-                    )
-
-                    // Row 3: All 7 Volume / Subdivision Level Meters
-                    LevelsMonitorCard(
-                        harmonyState = harmonyState,
-                        metronomeState = metronomeState,
-                        audioOutputMode = audioOutputMode,
-                        showOutputBadge = true,
-                        isCompactHeight = false,
-                        modifier = Modifier
-                            .weight(1.18f)
-                            .fillMaxWidth()
-                    )
                 }
 
-                MonitorMidiFooterStrip(
-                    midiState = midiState,
-                    isCompactHeight = isCompactHeight
-                )
+                // 3. BOTTOM DECK: Red Read-Only 37-Key Visual Keyboard (Left) + Green Harmony Telemetry Panel (Right)
+                Row(
+                    modifier = Modifier
+                        .weight(1.0f)
+                        .fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(gap)
+                ) {
+                    MonitorKeyboard37Card(
+                        harmonyState = harmonyState,
+                        isCompactHeight = isCompactHeight,
+                        modifier = Modifier
+                            .weight(1.42f)
+                            .fillMaxHeight()
+                    )
+
+                    HarmonyGreenBox(
+                        harmonyState = harmonyState,
+                        sustainPedalDown = sustainPedalDown,
+                        isCompactHeight = isCompactHeight,
+                        isWideScreen = isWideScreen,
+                        modifier = Modifier
+                            .weight(1.0f)
+                            .fillMaxHeight()
+                    )
+                }
             }
         }
     }
@@ -283,13 +679,12 @@ fun MidiMonitorScreen(
 private fun MonitorTopBar(
     midiState: MidiConnectionUiState,
     audioOutputMode: AudioOutputMode,
-    showOutputBadge: Boolean,
     isCompactHeight: Boolean,
-    isCompactWidth: Boolean,
+    showLastEvent: Boolean,
     onExitMonitor: () -> Unit
 ) {
     val isMidiConnected = midiState.connectedDeviceName != null
-    val barHeight = if (isCompactHeight) 36.dp else 40.dp
+    val barHeight = if (isCompactHeight) 28.dp else 34.dp
 
     Row(
         modifier = Modifier
@@ -298,27 +693,27 @@ private fun MonitorTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Lock status badge
+        // Lock & Hardware badge
         Surface(
             color = ElectricSky.copy(alpha = 0.14f),
-            shape = MaterialTheme.shapes.small,
+            shape = MaterialTheme.shapes.extraSmall,
             border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.55f)),
             modifier = Modifier.fillMaxHeight()
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 8.dp),
+                modifier = Modifier.padding(horizontal = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Icon(
                     imageVector = Icons.Filled.Lock,
                     contentDescription = null,
                     tint = ElectricSky,
-                    modifier = Modifier.size(14.dp)
+                    modifier = Modifier.size(12.dp)
                 )
                 Text(
-                    text = if (isCompactWidth) "LOCKED" else stringResource(R.string.monitor_mode_badge),
-                    style = MaterialTheme.typography.labelMedium,
+                    text = "SMK-37 PRO MONITOR",
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = ElectricSky,
                     maxLines = 1
@@ -326,13 +721,13 @@ private fun MonitorTopBar(
             }
         }
 
-        // Connected MIDI hardware device indicator (read-only)
+        // Connected MIDI device + live event telemetry strip (read-only)
         Surface(
             color = LcdMidnight,
-            shape = MaterialTheme.shapes.small,
+            shape = MaterialTheme.shapes.extraSmall,
             border = BorderStroke(
                 1.dp,
-                if (isMidiConnected) PitchEmerald.copy(alpha = 0.65f) else WarmAmber.copy(alpha = 0.5f)
+                if (isMidiConnected) PitchEmerald.copy(alpha = 0.6f) else WarmAmber.copy(alpha = 0.45f)
             ),
             modifier = Modifier
                 .weight(1f)
@@ -345,30 +740,50 @@ private fun MonitorTopBar(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(8.dp)
+                        .size(7.dp)
                         .clip(CircleShape)
                         .background(if (isMidiConnected) PitchEmerald else WarmAmber)
                 )
                 Text(
-                    text = midiState.connectedDeviceName ?: "NO MIDI KEYBOARD",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    text = midiState.connectedDeviceName ?: "NO MIDI",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
                     color = if (isMidiConnected) PitchEmerald else WarmAmber,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+
+                if (showLastEvent) {
+                    Text(
+                        text = "·",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MutedSlateText
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.Sensors,
+                        contentDescription = null,
+                        tint = ElectricSky.copy(alpha = 0.8f),
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = midiState.lastEventText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ElectricSky,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
 
-        // Audio output mode read-only badge (landscape top bar)
-        if (showOutputBadge) {
-            MonitorOutputModeBadge(
-                audioOutputMode = audioOutputMode,
-                modifier = Modifier.fillMaxHeight()
-            )
-        }
+        // Read-only Audio Output Mode badge
+        MonitorOutputModeBadge(
+            audioOutputMode = audioOutputMode,
+            modifier = Modifier.fillMaxHeight()
+        )
 
-        // Only interactive control on the entire screen: Hold-to-Exit unlock button
+        // Only interactive control on screen: press-and-hold unlock
         HoldToExitButton(
             onExitConfirmed = onExitMonitor,
             modifier = Modifier.fillMaxHeight()
@@ -411,16 +826,16 @@ private fun HoldToExitButton(
 
     val borderColor by animateColorAsState(
         targetValue = if (isHolding) WarmAmber else HardwareBorder,
-        animationSpec = tween(120),
+        animationSpec = tween(100),
         label = "hold_exit_border"
     )
 
     Surface(
-        shape = MaterialTheme.shapes.small,
+        shape = MaterialTheme.shapes.extraSmall,
         color = ConsoleSurface,
         border = BorderStroke(1.2.dp, borderColor),
         modifier = modifier
-            .width(106.dp)
+            .width(96.dp)
             .semantics { contentDescription = cdText }
             .testTag("monitor_hold_to_exit_button")
             .pointerInput(Unit) {
@@ -439,19 +854,17 @@ private fun HoldToExitButton(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            // Animated hold progress fill
             if (holdProgress > 0f) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .fillMaxHeight()
                         .fillMaxWidth(holdProgress)
-                        .background(WarmAmber.copy(alpha = 0.42f))
+                        .background(WarmAmber.copy(alpha = 0.45f))
                 )
             }
-
             Row(
-                modifier = Modifier.padding(horizontal = 8.dp),
+                modifier = Modifier.padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -459,7 +872,7 @@ private fun HoldToExitButton(
                     imageVector = if (isHolding) Icons.Filled.LockOpen else Icons.Filled.Lock,
                     contentDescription = null,
                     tint = if (isHolding) CrispOffWhite else WarmAmber,
-                    modifier = Modifier.size(14.dp)
+                    modifier = Modifier.size(12.dp)
                 )
                 Text(
                     text = if (isHolding) {
@@ -467,7 +880,7 @@ private fun HoldToExitButton(
                     } else {
                         stringResource(R.string.monitor_hold_to_exit)
                     },
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = if (isHolding) CrispOffWhite else WarmAmber,
                     maxLines = 1
@@ -478,540 +891,616 @@ private fun HoldToExitButton(
 }
 
 @Composable
-private fun HarmonyMonitorCard(
-    harmonyState: HarmonyUiState,
-    sustainPedalDown: Boolean,
+private fun HardwareKnobSlot(
+    model: KnobSlotModel,
+    isPulsing: Boolean,
     isCompactHeight: Boolean,
-    isLandscape: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val isPure = harmonyState.temperament == TemperamentMode.PURE
-    val rootName = PitchTheory.pitchClassName(harmonyState.effectiveRootIndex)
-    val tempLabel = if (isPure) {
-        val autoTag = if (harmonyState.autoDetectRoot) "AUTO" else "LOCK"
-        "PURE · ROOT $rootName ($autoTag)"
-    } else {
-        "EQUAL TEMPERAMENT"
-    }
-    val hasActiveNotes = harmonyState.activeWrittenMidis.isNotEmpty()
-    val cardPadding = if (isCompactHeight) 8.dp else 10.dp
-
-    Surface(
-        modifier = modifier,
-        color = LcdMidnight,
-        shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(
-            1.2.dp,
-            if (hasActiveNotes) ElectricSky.copy(alpha = 0.65f) else LcdBorder
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(cardPadding),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Header: Section label + Voice badge
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "HARMONY",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MutedSlateText,
-                    maxLines = 1
-                )
-                Surface(
-                    color = ElectricSkyContainer,
-                    shape = MaterialTheme.shapes.extraSmall,
-                    border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.65f))
-                ) {
-                    Text(
-                        text = harmonyState.voice.label.uppercase(Locale.US),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = ElectricSky,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                    )
-                }
-            }
-
-            if (isLandscape && isCompactHeight) {
-                // Compact landscape phone: side-by-side chord + temperament/badges
-                Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        ChordHeroText(
-                            chordLabel = harmonyState.chordLabel,
-                            isActive = hasActiveNotes,
-                            compact = true
-                        )
-                    }
-                    Column(
-                        modifier = Modifier.weight(1.15f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                        horizontalAlignment = Alignment.End
-                    ) {
-                        TemperamentPill(
-                            text = tempLabel,
-                            isPure = isPure,
-                            compact = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        HarmonyStatusFlagsRow(
-                            referencePitchHz = harmonyState.referencePitchHz,
-                            transpositionShort = harmonyState.transposition.shortLabel,
-                            isTransposed = harmonyState.transposition.semitoneOffset != 0,
-                            chordHoldEnabled = harmonyState.chordHoldEnabled,
-                            sustainPedalDown = sustainPedalDown,
-                            compact = true
-                        )
-                    }
-                }
-            } else {
-                // Standard portrait & tablet landscape layout
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    ChordHeroText(
-                        chordLabel = harmonyState.chordLabel,
-                        isActive = hasActiveNotes,
-                        compact = !isLandscape
-                    )
-                }
-
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    TemperamentPill(
-                        text = tempLabel,
-                        isPure = isPure,
-                        compact = false,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    HarmonyStatusFlagsRow(
-                        referencePitchHz = harmonyState.referencePitchHz,
-                        transpositionShort = harmonyState.transposition.shortLabel,
-                        isTransposed = harmonyState.transposition.semitoneOffset != 0,
-                        chordHoldEnabled = harmonyState.chordHoldEnabled,
-                        sustainPedalDown = sustainPedalDown,
-                        compact = !isLandscape
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChordHeroText(
-    chordLabel: String,
-    isActive: Boolean,
-    compact: Boolean
-) {
-    val fontSize = when {
-        chordLabel.length <= 4 -> if (compact) 34.sp else 46.sp
-        chordLabel.length <= 7 -> if (compact) 26.sp else 36.sp
-        else -> if (compact) 20.sp else 26.sp
-    }
-    val lineHeight = (fontSize.value * 1.08f).sp
-    Text(
-        text = chordLabel,
-        style = MaterialTheme.typography.displaySmall.copy(
-            fontSize = fontSize,
-            lineHeight = lineHeight
-        ),
-        color = if (isActive) ElectricSky else MutedSlateText.copy(alpha = 0.4f),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.testTag("monitor_chord_label")
+    val animatedNorm by animateFloatAsState(
+        targetValue = model.normalizedValue.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 70),
+        label = "knob_norm_${model.label}"
     )
-}
+    val activeAccent by animateColorAsState(
+        targetValue = when {
+            !model.isAssigned -> HardwareBorder.copy(alpha = 0.55f)
+            isPulsing -> CrispOffWhite
+            else -> model.accentColor
+        },
+        animationSpec = tween(durationMillis = 120),
+        label = "knob_accent_${model.label}"
+    )
 
-@Composable
-private fun TemperamentPill(
-    text: String,
-    isPure: Boolean,
-    compact: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val accent = if (isPure) PitchEmerald else WarmAmber
-    val bg = if (isPure) PitchEmerald.copy(alpha = 0.16f) else WarmAmberContainer
-    Surface(
+    Column(
         modifier = modifier,
-        color = bg,
-        shape = MaterialTheme.shapes.extraSmall,
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.8f))
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.dp)
     ) {
         Text(
-            text = text,
-            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = accent,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(
-                horizontal = if (compact) 6.dp else 8.dp,
-                vertical = if (compact) 2.dp else 4.dp
-            )
-        )
-    }
-}
-
-@Composable
-private fun HarmonyStatusFlagsRow(
-    referencePitchHz: Double,
-    transpositionShort: String,
-    isTransposed: Boolean,
-    chordHoldEnabled: Boolean,
-    sustainPedalDown: Boolean,
-    compact: Boolean
-) {
-    val pitchText = String.format(Locale.US, "A4 %.1f", referencePitchHz)
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        ReadOnlyTinyBadge(
-            text = pitchText,
-            color = WarmAmber,
-            highlighted = false,
-            compact = compact,
-            modifier = Modifier.weight(1.65f)
-        )
-        ReadOnlyTinyBadge(
-            text = transpositionShort,
-            color = if (isTransposed) WarmAmber else CrispOffWhite,
-            highlighted = isTransposed,
-            compact = compact,
-            modifier = Modifier.weight(0.60f)
-        )
-        ReadOnlyTinyBadge(
-            text = "HOLD",
-            color = if (chordHoldEnabled) ElectricSky else MutedSlateText,
-            highlighted = chordHoldEnabled,
-            compact = compact,
-            modifier = Modifier.weight(0.90f)
-        )
-        ReadOnlyTinyBadge(
-            text = "PED",
-            color = if (sustainPedalDown) PitchEmerald else MutedSlateText,
-            highlighted = sustainPedalDown,
-            compact = compact,
-            modifier = Modifier.weight(0.75f)
-        )
-    }
-}
-
-@Composable
-private fun ReadOnlyTinyBadge(
-    text: String,
-    color: Color,
-    highlighted: Boolean,
-    compact: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier,
-        color = if (highlighted) color.copy(alpha = 0.18f) else ConsoleSurface.copy(alpha = 0.75f),
-        shape = MaterialTheme.shapes.extraSmall,
-        border = BorderStroke(
-            1.dp,
-            if (highlighted) color.copy(alpha = 0.8f) else HardwareBorder.copy(alpha = 0.7f)
-        )
-    ) {
-        Text(
-            text = text,
+            text = if (model.isAssigned) model.label else "",
             style = MaterialTheme.typography.labelSmall,
-            fontSize = if (compact) 9.sp else 10.sp,
-            fontWeight = if (highlighted) FontWeight.Bold else FontWeight.Medium,
-            color = if (highlighted) color else color.copy(alpha = 0.78f),
-            textAlign = TextAlign.Center,
+            fontSize = if (isCompactHeight) 8.sp else 10.sp,
+            lineHeight = if (isCompactHeight) 9.sp else 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (isPulsing) CrispOffWhite else if (model.isAssigned) ElectricSky else MutedSlateText.copy(alpha = 0.4f),
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 3.dp, vertical = 3.dp)
+            overflow = TextOverflow.Ellipsis
         )
-    }
-}
 
-@Composable
-private fun MetronomeMonitorCard(
-    metronomeState: MetronomeUiState,
-    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
-    isCompactHeight: Boolean,
-    isLandscape: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val isPlaying = metronomeState.isPlaying
-    val cardPadding = if (isCompactHeight) 8.dp else 10.dp
-
-    Surface(
-        modifier = modifier,
-        color = LcdMidnight,
-        shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(
-            1.2.dp,
-            if (isPlaying) PitchEmerald.copy(alpha = 0.7f) else LcdBorder
-        )
-    ) {
-        Column(
+        Box(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(cardPadding),
-            verticalArrangement = Arrangement.SpaceBetween
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
         ) {
-            // Header: Metronome label + Playing/Stopped state
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val diameter = minOf(size.width, size.height) * 0.90f
+                val radius = diameter / 2f
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val arcTopLeft = Offset(center.x - radius, center.y - radius)
+                val arcSize = Size(diameter, diameter)
+                val strokePx = if (isCompactHeight) 2.5.dp.toPx() else 3.2.dp.toPx()
+
+                // Recessed knob body
+                drawCircle(
+                    color = if (model.isAssigned) LcdMidnight else StudioCharcoal.copy(alpha = 0.7f),
+                    radius = radius - strokePx * 0.6f,
+                    center = center
+                )
+
+                // Pulse halo while knob is actively turned
+                if (isPulsing && model.isAssigned) {
+                    drawCircle(
+                        color = model.accentColor.copy(alpha = 0.28f),
+                        radius = radius + 2.dp.toPx(),
+                        center = center
+                    )
+                }
+
+                // 270-degree background dial track
+                drawArc(
+                    color = HardwareBorder.copy(alpha = if (model.isAssigned) 0.75f else 0.4f),
+                    startAngle = 135f,
+                    sweepAngle = 270f,
+                    useCenter = false,
+                    topLeft = arcTopLeft,
+                    size = arcSize,
+                    style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                )
+
+                if (model.isAssigned) {
+                    // Active value arc
+                    drawArc(
+                        color = activeAccent,
+                        startAngle = 135f,
+                        sweepAngle = (270f * animatedNorm).coerceAtLeast(4f),
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                    )
+
+                    // Pointer tick on outer rim
+                    val angleRad = (135.0 + 270.0 * animatedNorm) * (PI / 180.0)
+                    val innerR = radius * 0.52f
+                    val outerR = radius * 0.92f
+                    drawLine(
+                        color = CrispOffWhite,
+                        start = Offset(
+                            center.x + (cos(angleRad) * innerR).toFloat(),
+                            center.y + (sin(angleRad) * innerR).toFloat()
+                        ),
+                        end = Offset(
+                            center.x + (cos(angleRad) * outerR).toFloat(),
+                            center.y + (sin(angleRad) * outerR).toFloat()
+                        ),
+                        strokeWidth = 1.6.dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
+                }
+            }
+
+            if (model.isAssigned) {
                 Text(
-                    text = "METRONOME",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "${model.cc}",
+                    fontFamily = JetBrainsMonoFontFamily,
                     fontWeight = FontWeight.Bold,
-                    color = MutedSlateText,
+                    fontSize = if (isCompactHeight) 9.sp else 11.sp,
+                    color = if (isPulsing) CrispOffWhite else PitchEmerald,
                     maxLines = 1
                 )
-                Surface(
-                    color = if (isPlaying) PitchEmerald.copy(alpha = 0.18f) else ConsoleSurface,
-                    shape = MaterialTheme.shapes.extraSmall,
-                    border = BorderStroke(
-                        1.dp,
-                        if (isPlaying) PitchEmerald else HardwareBorder
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(if (isPlaying) PitchEmerald else MutedSlateText)
-                        )
-                        Text(
-                            text = if (isPlaying) "PLAYING" else "STOPPED",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isPlaying) PitchEmerald else MutedSlateText,
-                            maxLines = 1
-                        )
-                    }
-                }
             }
-
-            // Center hero: Giant BPM + Time Signature + Metronome Sound
-            if (isLandscape && isCompactHeight) {
-                Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        Text(
-                            text = "${metronomeState.bpm}",
-                            style = MaterialTheme.typography.displaySmall.copy(
-                                fontSize = 36.sp,
-                                lineHeight = 38.sp
-                            ),
-                            color = if (isPlaying) PitchEmerald else ElectricSky,
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "BPM",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MutedSlateText,
-                            modifier = Modifier.padding(bottom = 5.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    TimeSignatureBadge(
-                        label = metronomeState.timeSignature.label,
-                        compact = true
-                    )
-                    MetronomeSoundBadge(
-                        label = metronomeState.metronomeSound.label,
-                        compact = true
-                    )
-                }
-            } else {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = "${metronomeState.bpm}",
-                                style = MaterialTheme.typography.displaySmall.copy(
-                                    fontSize = if (isLandscape) 46.sp else 32.sp,
-                                    lineHeight = if (isLandscape) 48.sp else 34.sp
-                                ),
-                                color = if (isPlaying) PitchEmerald else ElectricSky,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "BPM",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MutedSlateText,
-                                modifier = Modifier.padding(bottom = 5.dp)
-                            )
-                        }
-
-                        TimeSignatureBadge(
-                            label = metronomeState.timeSignature.label,
-                            compact = !isLandscape
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    MetronomeSoundBadge(
-                        label = metronomeState.metronomeSound.label,
-                        compact = !isLandscape,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-
-            // Bottom isolated Beat LED Bar + Mute Drill indicator
-            MonitorBeatLedBar(
-                beatSnapshotFlow = beatSnapshotFlow,
-                fallbackTotalBeats = metronomeState.timeSignature.beatsPerMeasure,
-                alternateMuteBar = metronomeState.alternateMuteBar,
-                isCompactHeight = isCompactHeight
-            )
         }
-    }
-}
 
-@Composable
-private fun TimeSignatureBadge(
-    label: String,
-    compact: Boolean
-) {
-    Surface(
-        color = ConsoleSurface,
-        shape = MaterialTheme.shapes.small,
-        border = BorderStroke(1.dp, ElectricSky.copy(alpha = 0.5f))
-    ) {
         Text(
-            text = label,
+            text = if (model.isAssigned) model.valueText else "—",
             fontFamily = JetBrainsMonoFontFamily,
             fontWeight = FontWeight.Bold,
-            fontSize = if (compact) 14.sp else 20.sp,
-            color = CrispOffWhite,
-            maxLines = 1,
-            modifier = Modifier.padding(
-                horizontal = if (compact) 6.dp else 10.dp,
-                vertical = if (compact) 3.dp else 4.dp
-            )
+            fontSize = if (isCompactHeight) 8.sp else 10.sp,
+            lineHeight = if (isCompactHeight) 9.sp else 11.sp,
+            color = if (model.isAssigned) activeAccent else MutedSlateText.copy(alpha = 0.28f),
+            maxLines = 1
         )
     }
 }
 
 @Composable
-private fun MetronomeSoundBadge(
-    label: String,
-    compact: Boolean,
+private fun HardwarePadSlot(
+    model: PadSlotModel,
+    isPulsing: Boolean,
+    isCompactHeight: Boolean,
     modifier: Modifier = Modifier
 ) {
-    Surface(
+    val isActiveGlow = model.isAssigned && (model.isLit || isPulsing)
+
+    val containerTarget = when {
+        !model.isAssigned -> StudioCharcoal.copy(alpha = 0.6f)
+        isPulsing -> model.litColor.copy(alpha = 0.45f)
+        model.isLit -> model.litColor.copy(alpha = 0.28f)
+        else -> LcdMidnight
+    }
+    val borderTarget = when {
+        !model.isAssigned -> HardwareBorder.copy(alpha = 0.42f)
+        isPulsing -> CrispOffWhite
+        model.isLit -> model.litColor
+        model.offAccentColor != null -> model.offAccentColor.copy(alpha = 0.55f)
+        else -> HardwareBorder
+    }
+    val containerColor by animateColorAsState(
+        targetValue = containerTarget,
+        animationSpec = tween(durationMillis = 100),
+        label = "pad_bg_${model.cc}"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = borderTarget,
+        animationSpec = tween(durationMillis = 100),
+        label = "pad_border_${model.cc}"
+    )
+
+    Column(
         modifier = modifier,
-        color = WarmAmber.copy(alpha = 0.14f),
-        shape = MaterialTheme.shapes.extraSmall,
-        border = BorderStroke(1.dp, WarmAmber.copy(alpha = 0.55f))
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.dp)
     ) {
         Text(
-            text = label.uppercase(Locale.US),
-            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = WarmAmber,
+            text = if (model.isAssigned) model.label else "",
+            style = MaterialTheme.typography.labelSmall,
+            fontSize = if (isCompactHeight) 8.sp else 10.sp,
+            lineHeight = if (isCompactHeight) 9.sp else 11.sp,
+            fontWeight = if (isActiveGlow) FontWeight.Bold else FontWeight.Medium,
+            color = when {
+                !model.isAssigned -> Color.Transparent
+                isActiveGlow -> model.litColor
+                else -> MutedSlateText
+            },
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(
-                horizontal = if (compact) 6.dp else 8.dp,
-                vertical = if (compact) 3.dp else 4.dp
+            overflow = TextOverflow.Ellipsis
+        )
+
+        Surface(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .testTag(if (model.isAssigned) "monitor_pad_cc_${model.cc}" else "monitor_pad_empty"),
+            color = containerColor,
+            shape = RoundedCornerShape(if (isCompactHeight) 5.dp else 7.dp),
+            border = BorderStroke(if (isActiveGlow) 1.6.dp else 1.dp, borderColor)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 3.dp, vertical = 2.dp)
+            ) {
+                if (model.isAssigned) {
+                    // Top-right hardware LED lamp (lights up bright on 40 / 41 / 42 when ON, or flashes on trigger)
+                    val ledColor = when {
+                        isPulsing -> CrispOffWhite
+                        model.isLit -> model.litColor
+                        model.offAccentColor != null && model.isToggle -> model.offAccentColor.copy(alpha = 0.75f)
+                        else -> HardwareBorder.copy(alpha = 0.65f)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(1.dp)
+                            .size(if (isCompactHeight) 5.dp else 6.dp)
+                            .clip(CircleShape)
+                            .background(ledColor)
+                    )
+
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = "${model.cc}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = if (isCompactHeight) 11.sp else 14.sp,
+                            lineHeight = if (isCompactHeight) 12.sp else 15.sp,
+                            color = when {
+                                isActiveGlow -> CrispOffWhite
+                                model.offAccentColor != null -> model.offAccentColor
+                                else -> PitchEmerald
+                            },
+                            maxLines = 1
+                        )
+                        model.statusTag?.let { tag ->
+                            Text(
+                                text = tag,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = if (isCompactHeight) 7.sp else 9.sp,
+                                lineHeight = if (isCompactHeight) 8.sp else 10.sp,
+                                color = when {
+                                    model.isLit -> model.litColor
+                                    model.offAccentColor != null -> model.offAccentColor
+                                    else -> MutedSlateText.copy(alpha = 0.75f)
+                                },
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HardwareFaderSlot(
+    model: FaderSlotModel,
+    isPulsing: Boolean,
+    isCompactHeight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val clamped = model.level.coerceIn(0f, 1f)
+    val animatedLevel by animateFloatAsState(
+        targetValue = clamped,
+        animationSpec = tween(durationMillis = 70),
+        label = "fader_level_${model.label}"
+    )
+    val percent = (clamped * 100f).roundToInt()
+    val isActive = clamped > 0.005f
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isPulsing -> CrispOffWhite
+            isActive -> model.accentColor.copy(alpha = 0.55f)
+            else -> HardwareBorder.copy(alpha = 0.7f)
+        },
+        animationSpec = tween(durationMillis = 100),
+        label = "fader_border_${model.label}"
+    )
+
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        // CC number + function name at top (matching user's sketch)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            if (model.cc >= 0) {
+                Text(
+                    text = "${model.cc}",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = if (isCompactHeight) 8.sp else 10.sp,
+                    color = PitchEmerald,
+                    maxLines = 1
+                )
+            }
+            Text(
+                text = model.label,
+                fontFamily = SpaceGroteskFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = if (isCompactHeight) 8.sp else 10.sp,
+                color = if (isPulsing) CrispOffWhite else if (isActive) CrispOffWhite else MutedSlateText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
+        }
+
+        // Recessed hardware vertical fader track with glowing fill and sliding thumb cap
+        Surface(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            color = LcdMidnight,
+            shape = RoundedCornerShape(6.dp),
+            border = BorderStroke(if (isPulsing) 1.5.dp else 1.dp, borderColor)
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 4.dp, vertical = 5.dp)
+            ) {
+                val w = size.width
+                val h = size.height
+                val centerX = w / 2f
+                val thumbH = (if (isCompactHeight) 7.dp else 10.dp).toPx()
+                val travelTop = thumbH / 2f
+                val travelBottom = (h - thumbH / 2f).coerceAtLeast(travelTop + 1f)
+                val travelSpan = travelBottom - travelTop
+                val thumbY = travelBottom - (animatedLevel * travelSpan)
+
+                // Scale ticks along sides
+                val tickColor = HardwareBorder.copy(alpha = 0.5f)
+                for (frac in floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)) {
+                    val ty = travelBottom - frac * travelSpan
+                    drawLine(
+                        color = tickColor,
+                        start = Offset(0f, ty),
+                        end = Offset(w * 0.24f, ty),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                    drawLine(
+                        color = tickColor,
+                        start = Offset(w * 0.76f, ty),
+                        end = Offset(w, ty),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                }
+
+                // Center slot groove
+                val slotW = 3.5.dp.toPx()
+                drawRoundRect(
+                    color = StudioCharcoal,
+                    topLeft = Offset(centerX - slotW / 2f, travelTop),
+                    size = Size(slotW, travelSpan),
+                    cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                )
+
+                // Glowing active level bar inside slot
+                if (animatedLevel > 0.005f) {
+                    drawRoundRect(
+                        color = model.accentColor,
+                        topLeft = Offset(centerX - slotW / 2f, thumbY),
+                        size = Size(slotW, (travelBottom - thumbY).coerceAtLeast(2.dp.toPx())),
+                        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                    )
+                }
+
+                // Sliding hardware fader cap/thumb
+                val thumbW = (w * 0.78f).coerceAtLeast(10.dp.toPx())
+                drawRoundRect(
+                    color = if (isPulsing) model.accentColor else ConsoleSurfaceBright,
+                    topLeft = Offset(centerX - thumbW / 2f, thumbY - thumbH / 2f),
+                    size = Size(thumbW, thumbH),
+                    cornerRadius = CornerRadius(2.5.dp.toPx(), 2.5.dp.toPx())
+                )
+                drawLine(
+                    color = if (isActive || isPulsing) CrispOffWhite else MutedSlateText,
+                    start = Offset(centerX - thumbW * 0.34f, thumbY),
+                    end = Offset(centerX + thumbW * 0.34f, thumbY),
+                    strokeWidth = 1.5.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
+        }
+
+        // Percentage readout
+        Text(
+            text = "$percent%",
+            fontFamily = JetBrainsMonoFontFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = if (isCompactHeight) 8.sp else 10.sp,
+            lineHeight = if (isCompactHeight) 9.sp else 11.sp,
+            color = if (isActive) model.accentColor else MutedSlateText.copy(alpha = 0.55f),
+            maxLines = 1
         )
     }
 }
 
 /**
- * Isolated Beat LED Bar that collects [beatSnapshotFlow] without recomposing parent cards.
+ * Yellow Zone (bottom-left under Fader CC #1): Core Metronome BPM + Time Signature + Play/Stop status.
+ */
+@Composable
+private fun MetronomeYellowBox(
+    metronomeState: MetronomeUiState,
+    isCompactHeight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val isPlaying = metronomeState.isPlaying
+    Surface(
+        modifier = modifier.testTag("monitor_metronome_yellow_box"),
+        color = LcdMidnight,
+        shape = MaterialTheme.shapes.small,
+        border = BorderStroke(1.5.dp, MetronomeYellowBorder.copy(alpha = if (isPlaying) 0.95f else 0.7f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 5.dp, vertical = if (isCompactHeight) 3.dp else 5.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(if (isPlaying) PitchEmerald else MutedSlateText)
+                )
+                Text(
+                    text = if (isPlaying) "PLAY · BPM" else "BPM",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = if (isCompactHeight) 7.5.sp else 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isPlaying) PitchEmerald else MutedSlateText,
+                    maxLines = 1
+                )
+            }
+
+            Text(
+                text = "${metronomeState.bpm}",
+                style = MaterialTheme.typography.displaySmall.copy(
+                    fontSize = if (isCompactHeight) 19.sp else 26.sp,
+                    lineHeight = if (isCompactHeight) 20.sp else 28.sp
+                ),
+                color = if (isPlaying) PitchEmerald else MetronomeYellowBorder,
+                maxLines = 1
+            )
+
+            Surface(
+                color = ConsoleSurface,
+                shape = RoundedCornerShape(3.dp),
+                border = BorderStroke(0.8.dp, MetronomeYellowBorder.copy(alpha = 0.65f))
+            ) {
+                Text(
+                    text = metronomeState.timeSignature.label,
+                    fontFamily = JetBrainsMonoFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = if (isCompactHeight) 10.sp else 13.sp,
+                    color = CrispOffWhite,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Purple Zone (bottom-right under Faders 64..67): Metronome Click Sound, Master Volume,
+ * 1/1 Mute Bar alert, and isolated Large Beat LED Strip.
+ */
+@Composable
+private fun MetronomePurpleBox(
+    metronomeState: MetronomeUiState,
+    beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
+    isCompactHeight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val metroPercent = (metronomeState.metronomeGain.coerceIn(0f, 1f) * 100f).roundToInt()
+
+    Surface(
+        modifier = modifier.testTag("monitor_metronome_purple_box"),
+        color = LcdMidnight,
+        shape = MaterialTheme.shapes.small,
+        border = BorderStroke(1.5.dp, MetronomePurpleBorder.copy(alpha = 0.85f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 7.dp, vertical = if (isCompactHeight) 4.dp else 6.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Top strip: Metronome Sound + Metro Master Vol bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    color = WarmAmber.copy(alpha = 0.14f),
+                    shape = RoundedCornerShape(3.dp),
+                    border = BorderStroke(0.8.dp, WarmAmber.copy(alpha = 0.6f)),
+                    modifier = Modifier.weight(1.1f)
+                ) {
+                    Text(
+                        text = metronomeState.metronomeSound.label.uppercase(Locale.US),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = if (isCompactHeight) 8.sp else 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WarmAmber,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                    )
+                }
+
+                // Metro Master Volume mini meter + percentage
+                Row(
+                    modifier = Modifier.weight(0.95f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "VOL",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = if (isCompactHeight) 7.5.sp else 9.sp,
+                        color = MutedSlateText,
+                        maxLines = 1
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(if (isCompactHeight) 6.dp else 8.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(ConsoleSurface)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(metronomeState.metronomeGain.coerceIn(0f, 1f))
+                                .background(PitchEmerald)
+                        )
+                    }
+                    Text(
+                        text = "$metroPercent%",
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = if (isCompactHeight) 8.sp else 10.sp,
+                        color = PitchEmerald,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            // Bottom strip: Isolated large Beat LED bar + 1/1 Mute Bar status
+            MonitorBeatLedBar(
+                beatSnapshotFlow = beatSnapshotFlow,
+                fallbackTotalBeats = metronomeState.timeSignature.beatsPerMeasure,
+                alternateMuteBar = metronomeState.alternateMuteBar,
+                isCompactHeight = isCompactHeight,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (isCompactHeight) 16.dp else 22.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Isolated Beat LED Bar that collects [beatSnapshotFlow] without recomposing parent controls.
  */
 @Composable
 private fun MonitorBeatLedBar(
     beatSnapshotFlow: StateFlow<MetronomeBeatSnapshot>,
     fallbackTotalBeats: Int,
     alternateMuteBar: Boolean,
-    isCompactHeight: Boolean
+    isCompactHeight: Boolean,
+    modifier: Modifier = Modifier
 ) {
     val beatSnap by beatSnapshotFlow.collectAsStateWithLifecycle()
     val ledDesc = stringResource(R.string.cd_beat_led)
     val total = (if (beatSnap.isPlaying) beatSnap.totalBeats else fallbackTotalBeats).coerceIn(1, 16)
-    val barHeight = if (isCompactHeight) 14.dp else 18.dp
-    val segmentSpacing = if (total > 10) 2.dp else 4.dp
+    val segmentSpacing = if (total > 10) 2.dp else 3.dp
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics { contentDescription = ledDesc },
+        modifier = modifier.semantics { contentDescription = ledDesc },
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Row(
             modifier = Modifier
                 .weight(1f)
-                .height(barHeight),
+                .fillMaxHeight(),
             horizontalArrangement = Arrangement.spacedBy(segmentSpacing),
             verticalAlignment = Alignment.CenterVertically
         ) {
             for (b in 0 until total) {
                 val isCurrent = beatSnap.isPlaying && beatSnap.beatIndex == b
                 val targetColor = when {
-                    !isCurrent && b == 0 -> DownbeatCrimson.copy(alpha = 0.22f)
+                    !isCurrent && b == 0 -> DownbeatCrimson.copy(alpha = 0.24f)
                     !isCurrent -> ConsoleSurface
                     beatSnap.isMutedBar -> WarmAmber
                     b == 0 -> DownbeatCrimson
@@ -1019,7 +1508,7 @@ private fun MonitorBeatLedBar(
                 }
                 val ledColor by animateColorAsState(
                     targetValue = targetColor,
-                    animationSpec = tween(durationMillis = 65),
+                    animationSpec = tween(durationMillis = 60),
                     label = "monitor_beat_led_$b"
                 )
                 Box(
@@ -1036,46 +1525,70 @@ private fun MonitorBeatLedBar(
             val isMutedNow = beatSnap.isPlaying && beatSnap.isMutedBar
             Surface(
                 color = if (isMutedNow) WarmAmber else WarmAmberContainer,
-                shape = MaterialTheme.shapes.extraSmall,
+                shape = RoundedCornerShape(3.dp),
                 border = BorderStroke(1.dp, WarmAmber)
             ) {
                 Text(
-                    text = if (isMutedNow) "MUTED" else "1/1 MUTE",
+                    text = if (isMutedNow) "MUTED" else "1/1",
                     style = MaterialTheme.typography.labelSmall,
+                    fontSize = if (isCompactHeight) 7.5.sp else 9.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (isMutedNow) StudioCharcoal else WarmAmber,
                     maxLines = 1,
-                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                 )
             }
         }
     }
 }
 
+/**
+ * Red Zone (bottom-left): Read-only 37-key SMK-37 PRO visual keyboard monitor with
+ * Auto-Octave follow and Pure Just Intonation Root highlighting.
+ */
 @Composable
-private fun HeldKeysMonitorCard(
+private fun MonitorKeyboard37Card(
     harmonyState: HarmonyUiState,
-    isLandscape: Boolean,
     isCompactHeight: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val notes = harmonyState.activePitchInfos
+    val activeMidis = harmonyState.activeWrittenMidis
     val isPure = harmonyState.temperament == TemperamentMode.PURE
-    val cardPadding = if (isCompactHeight) 8.dp else 10.dp
+    val pitchInfoByWritten = remember(harmonyState.activePitchInfos) {
+        harmonyState.activePitchInfos.associateBy { it.writtenMidi }
+    }
+
+    // Default 37-key SMK-37 PRO window is C3 (48) to C6 (84); auto-shifts in clean C-octaves if played outside range
+    val startMidiC = remember(activeMidis) {
+        if (activeMidis.isEmpty()) {
+            48
+        } else {
+            val minNote = activeMidis.min()
+            val maxNote = activeMidis.max()
+            if (minNote >= 48 && maxNote <= 84) {
+                48
+            } else {
+                ((minNote / 12) * 12).coerceIn(24, 72)
+            }
+        }
+    }
+    val endMidiC = startMidiC + 36
+    val hasBelowRange = activeMidis.any { it < startMidiC }
+    val hasAboveRange = activeMidis.any { it > endMidiC }
 
     Surface(
-        modifier = modifier,
+        modifier = modifier.testTag("monitor_keyboard_red_box"),
         color = AnodizedSlate,
         shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(1.2.dp, HardwareBorder)
+        border = BorderStroke(1.5.dp, KeyboardRedBorder.copy(alpha = 0.85f))
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(cardPadding),
-            verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 5.dp else 7.dp)
+                .padding(horizontal = 6.dp, vertical = if (isCompactHeight) 4.dp else 6.dp),
+            verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 3.dp else 5.dp)
         ) {
-            // Header strip
+            // Compact keyboard header strip
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1085,235 +1598,295 @@ private fun HeldKeysMonitorCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Piano,
-                        contentDescription = null,
-                        tint = ElectricSky,
-                        modifier = Modifier.size(14.dp)
-                    )
                     Text(
-                        text = "HELD KEYS",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "KEYBOARD · ${PitchTheory.noteNameWithOctave(startMidiC)}–${PitchTheory.noteNameWithOctave(endMidiC)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = if (isCompactHeight) 8.5.sp else 10.sp,
                         fontWeight = FontWeight.Bold,
                         color = CrispOffWhite,
                         maxLines = 1
                     )
+                    if (hasBelowRange) {
+                        Text(
+                            text = "◀ LOW",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WarmAmber
+                        )
+                    }
+                    if (hasAboveRange) {
+                        Text(
+                            text = "HIGH ▶",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WarmAmber
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (isPure) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(PitchEmerald)
+                            )
+                            Text(
+                                text = "ROOT",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = if (isCompactHeight) 7.5.sp else 9.sp,
+                                color = PitchEmerald
+                            )
+                        }
+                    }
                     Surface(
-                        color = if (notes.isNotEmpty()) ElectricSkyContainer else ConsoleSurface,
-                        shape = MaterialTheme.shapes.extraSmall,
+                        color = if (activeMidis.isNotEmpty()) ElectricSkyContainer else ConsoleSurface,
+                        shape = RoundedCornerShape(3.dp),
                         border = BorderStroke(
-                            1.dp,
-                            if (notes.isNotEmpty()) ElectricSky.copy(alpha = 0.6f) else HardwareBorder
+                            0.8.dp,
+                            if (activeMidis.isNotEmpty()) ElectricSky.copy(alpha = 0.7f) else HardwareBorder
                         )
                     ) {
                         Text(
-                            text = if (notes.isEmpty()) "0" else "${notes.size} HELD",
+                            text = if (activeMidis.isEmpty()) "READ-ONLY" else "${activeMidis.size} ACTIVE",
                             style = MaterialTheme.typography.labelSmall,
+                            fontSize = if (isCompactHeight) 7.5.sp else 9.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (notes.isNotEmpty()) ElectricSky else MutedSlateText,
+                            color = if (activeMidis.isNotEmpty()) ElectricSky else MutedSlateText,
                             modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                         )
                     }
                 }
-
-                Text(
-                    text = if (isPure) "CENTS vs ET" else "FREQUENCY Hz",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MutedSlateText,
-                    maxLines = 1
-                )
             }
 
-            // Deterministic zero-overflow note tile grid (no virtual keyboard, no scroll)
-            if (notes.isEmpty()) {
-                Surface(
-                    color = LcdMidnight,
-                    shape = MaterialTheme.shapes.small,
-                    border = BorderStroke(1.dp, LcdBorder),
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "NO KEYS HELD · PLAY MIDI KEYBOARD",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MutedSlateText.copy(alpha = 0.7f),
-                            textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-                    }
-                }
-            } else {
-                val maxVisibleTiles = 12
-                val hasOverflow = notes.size > maxVisibleTiles
-                val visibleNotes = if (hasOverflow) notes.take(maxVisibleTiles - 1) else notes
-                val hiddenCount = notes.size - visibleNotes.size
-                val totalSlots = visibleNotes.size + if (hasOverflow) 1 else 0
-
-                val rowCount = when {
-                    totalSlots <= 4 -> 1
-                    totalSlots <= 8 -> 2
-                    isLandscape -> 2
-                    else -> 3
-                }
-                val colsPerRow = (totalSlots + rowCount - 1) / rowCount
-                val isDense = rowCount >= 2 || colsPerRow >= 5 || isCompactHeight
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    for (r in 0 until rowCount) {
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            for (c in 0 until colsPerRow) {
-                                val slotIdx = r * colsPerRow + c
-                                when {
-                                    slotIdx < visibleNotes.size -> {
-                                        HeldKeyTile(
-                                            info = visibleNotes[slotIdx],
-                                            isPure = isPure,
-                                            isDense = isDense,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .fillMaxHeight()
-                                        )
-                                    }
-                                    slotIdx == visibleNotes.size && hasOverflow -> {
-                                        Surface(
-                                            color = ConsoleSurface,
-                                            shape = MaterialTheme.shapes.small,
-                                            border = BorderStroke(1.dp, HardwareBorder),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .fillMaxHeight()
-                                        ) {
-                                            Box(
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Text(
-                                                    text = "+$hiddenCount MORE",
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = MutedSlateText,
-                                                    maxLines = 1
-                                                )
-                                            }
-                                        }
-                                    }
-                                    else -> {
-                                        Spacer(modifier = Modifier.weight(1f))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HeldKeyTile(
-    info: NotePitchInfo,
-    isPure: Boolean,
-    isDense: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val isRoot = isPure && info.intervalName == "Root"
-    val borderColor = if (isRoot) PitchEmerald else ElectricSky.copy(alpha = 0.65f)
-    val noteDisplay = if (info.writtenName == info.soundingName) {
-        info.soundingName
-    } else {
-        "${info.writtenName}→${info.soundingName}"
-    }
-    val detailText = if (isPure) {
-        val sign = if (info.centsOffsetFromEt >= 0.0) "+" else ""
-        String.format(Locale.US, "%s %s%.1f¢", info.intervalName, sign, info.centsOffsetFromEt)
-    } else {
-        String.format(Locale.US, "%.1f Hz", info.frequencyHz)
-    }
-    val detailColor = when {
-        !isPure -> MutedSlateText
-        abs(info.centsOffsetFromEt) < 0.05 -> PitchEmerald
-        info.centsOffsetFromEt < 0.0 -> ElectricSky
-        else -> WarmAmber
-    }
-
-    Surface(
-        modifier = modifier,
-        color = LcdMidnight,
-        shape = MaterialTheme.shapes.small,
-        border = BorderStroke(1.2.dp, borderColor)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 6.dp, vertical = if (isDense) 3.dp else 6.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = noteDisplay,
-                fontFamily = JetBrainsMonoFontFamily,
-                fontWeight = FontWeight.Bold,
-                fontSize = if (isDense) 15.sp else 21.sp,
-                color = if (isRoot) PitchEmerald else CrispOffWhite,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = detailText,
-                style = MaterialTheme.typography.labelSmall,
-                fontSize = if (isDense) 9.sp else 11.sp,
-                fontWeight = FontWeight.Medium,
-                color = detailColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            // Strictly read-only 37-key visual piano (22 white keys + 15 black keys)
+            MonitorPianoKeyboard37(
+                startMidiC = startMidiC,
+                activeWrittenMidis = activeMidis,
+                pitchInfoByWritten = pitchInfoByWritten,
+                isPureMode = isPure,
+                isCompactHeight = isCompactHeight,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
             )
         }
     }
 }
 
 @Composable
-private fun LevelsMonitorCard(
-    harmonyState: HarmonyUiState,
-    metronomeState: MetronomeUiState,
-    audioOutputMode: AudioOutputMode,
-    showOutputBadge: Boolean,
+private fun MonitorPianoKeyboard37(
+    startMidiC: Int,
+    activeWrittenMidis: Set<Int>,
+    pitchInfoByWritten: Map<Int, NotePitchInfo>,
+    isPureMode: Boolean,
     isCompactHeight: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val mix = metronomeState.subdivisionMix
-    val cardPadding = if (isCompactHeight) 8.dp else 10.dp
+    // 3 full octaves (C..B x 3 = 21 white) + final top C (1 white) = 22 white + 15 black = 37 keys
+    val whiteOffsetsPerOctave = intArrayOf(0, 2, 4, 5, 7, 9, 11)
+    val whiteMidis = remember(startMidiC) {
+        buildList(22) {
+            for (oct in 0 until 3) {
+                for (semi in whiteOffsetsPerOctave) {
+                    add(startMidiC + oct * 12 + semi)
+                }
+            }
+            add(startMidiC + 36) // Top C
+        }
+    }
+    // Black key semitone offset -> white-key boundary index within octave (between white 0|1, 1|2, 3|4, 4|5, 5|6)
+    val blackSpecsPerOctave = remember {
+        listOf(
+            1 to 1,
+            3 to 2,
+            6 to 4,
+            8 to 5,
+            10 to 6
+        )
+    }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(StudioCharcoal)
+            .border(1.dp, HardwareBorder, RoundedCornerShape(6.dp))
+            .padding(2.dp)
+    ) {
+        val whiteKeyGap = 1.dp
+        val whiteKeyPitch = (maxWidth + whiteKeyGap) / 22f
+        val blackKeyWidth = whiteKeyPitch * 0.64f
+        val blackKeyHeight = maxHeight * 0.58f
+
+        // White keys layer (22 keys, strictly non-interactive)
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(whiteKeyGap)
+        ) {
+            whiteMidis.forEach { midi ->
+                val isActive = midi in activeWrittenMidis
+                val info = pitchInfoByWritten[midi]
+                val isRoot = isActive && isPureMode && info?.intervalName == "Root"
+                val isCNote = midi % 12 == 0
+                val keyShape = RoundedCornerShape(
+                    topStart = 2.dp,
+                    topEnd = 2.dp,
+                    bottomStart = 4.dp,
+                    bottomEnd = 4.dp
+                )
+                val keyFill = when {
+                    isRoot -> PitchEmerald
+                    isActive -> IvoryKeyPressed
+                    else -> IvoryKey
+                }
+                val keyBorder = when {
+                    isRoot -> CrispOffWhite
+                    isActive -> ElectricSky
+                    else -> HardwareBorder.copy(alpha = 0.65f)
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clip(keyShape)
+                        .background(keyFill)
+                        .border(if (isActive) 1.5.dp else 0.6.dp, keyBorder, keyShape),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    if (isActive) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(if (isCompactHeight) 5.dp else 7.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isRoot) StudioCharcoal else ElectricSky)
+                            )
+                            Text(
+                                text = PitchTheory.pitchClassName(midi),
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = if (isCompactHeight) 7.sp else 9.sp,
+                                color = StudioCharcoal,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    } else if (isCNote) {
+                        Text(
+                            text = PitchTheory.noteNameWithOctave(midi),
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = if (isCompactHeight) 6.5.sp else 8.sp,
+                            color = MutedSlateText,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Black keys overlay (15 keys across 3 octaves, strictly non-interactive)
+        for (oct in 0 until 3) {
+            blackSpecsPerOctave.forEach { (semi, boundaryIdx) ->
+                val midi = startMidiC + oct * 12 + semi
+                val isActive = midi in activeWrittenMidis
+                val info = pitchInfoByWritten[midi]
+                val isRoot = isActive && isPureMode && info?.intervalName == "Root"
+                val xOffset = (whiteKeyPitch * (oct * 7 + boundaryIdx)) - (whiteKeyGap / 2f) - (blackKeyWidth / 2f)
+                val blackShape = RoundedCornerShape(
+                    topStart = 2.dp,
+                    topEnd = 2.dp,
+                    bottomStart = 4.dp,
+                    bottomEnd = 4.dp
+                )
+                val blackFill = when {
+                    isRoot -> PitchEmerald
+                    isActive -> ElectricSky
+                    else -> EbonyKey
+                }
+                val blackBorder = when {
+                    isRoot -> CrispOffWhite
+                    isActive -> IvoryKeyPressed
+                    else -> StudioCharcoal
+                }
+
+                Box(
+                    modifier = Modifier
+                        .offset(x = xOffset)
+                        .width(blackKeyWidth)
+                        .height(blackKeyHeight)
+                        .clip(blackShape)
+                        .background(blackFill)
+                        .border(if (isActive) 1.2.dp else 0.7.dp, blackBorder, blackShape),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    if (isActive) {
+                        Box(
+                            modifier = Modifier
+                                .padding(bottom = 4.dp)
+                                .size(if (isCompactHeight) 5.dp else 6.dp)
+                                .clip(CircleShape)
+                                .background(StudioCharcoal)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Green Zone (bottom-right): Harmony & Tuning Telemetry (Chord, Instrument Voice, Tone Vol,
+ * Pure vs Equal + Root, A4 Hz, Transposition Key, Hold/Pedal badges, Held Note cents/Hz).
+ */
+@Composable
+private fun HarmonyGreenBox(
+    harmonyState: HarmonyUiState,
+    sustainPedalDown: Boolean,
+    isCompactHeight: Boolean,
+    isWideScreen: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val isPure = harmonyState.temperament == TemperamentMode.PURE
+    val rootName = PitchTheory.pitchClassName(harmonyState.effectiveRootIndex)
+    val tempLabel = if (isPure) {
+        val autoTag = if (harmonyState.autoDetectRoot) "AUTO" else "LOCK"
+        "PURE · $rootName ($autoTag)"
+    } else {
+        "EQUAL"
+    }
+    val hasActiveNotes = harmonyState.activeWrittenMidis.isNotEmpty()
+    val tonePercent = (harmonyState.toneGain.coerceIn(0f, 1f) * 100f).roundToInt()
 
     Surface(
-        modifier = modifier,
-        color = AnodizedSlate,
+        modifier = modifier.testTag("monitor_harmony_green_box"),
+        color = LcdMidnight,
         shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(1.2.dp, HardwareBorder)
+        border = BorderStroke(1.5.dp, HarmonyGreenBorder.copy(alpha = 0.85f))
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(cardPadding),
-            verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 5.dp else 7.dp)
+                .padding(horizontal = 8.dp, vertical = if (isCompactHeight) 5.dp else 8.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Header
+            // Top Row: HARMONY label + Active Instrument Voice + Tone Vol %
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1321,211 +1894,301 @@ private fun LevelsMonitorCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.GraphicEq,
-                        contentDescription = null,
-                        tint = ElectricSky,
-                        modifier = Modifier.size(14.dp)
-                    )
                     Text(
-                        text = "OUTPUT LEVELS",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "HARMONY",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = if (isCompactHeight) 8.5.sp else 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = CrispOffWhite,
+                        color = HarmonyGreenBorder,
                         maxLines = 1
                     )
+                    Surface(
+                        color = ElectricSkyContainer,
+                        shape = RoundedCornerShape(3.dp),
+                        border = BorderStroke(0.8.dp, ElectricSky.copy(alpha = 0.7f))
+                    ) {
+                        Text(
+                            text = harmonyState.voice.label.uppercase(Locale.US),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = if (isCompactHeight) 8.5.sp else 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ElectricSky,
+                            maxLines = 1,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.5.dp)
+                        )
+                    }
                 }
 
-                if (showOutputBadge) {
-                    MonitorOutputModeBadge(audioOutputMode = audioOutputMode)
-                } else {
+                Text(
+                    text = "TONE $tonePercent%",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = if (isCompactHeight) 8.5.sp else 10.sp,
+                    color = ElectricSky,
+                    maxLines = 1
+                )
+            }
+
+            // Middle Hero: Giant Active Chord (Left) + Pure/Equal Temperament Pill (Right)
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                val chordLen = harmonyState.chordLabel.length
+                val chordSize = when {
+                    chordLen <= 4 -> if (isCompactHeight) 28.sp else if (isWideScreen) 42.sp else 34.sp
+                    chordLen <= 7 -> if (isCompactHeight) 22.sp else if (isWideScreen) 34.sp else 28.sp
+                    else -> if (isCompactHeight) 16.sp else 24.sp
+                }
+                Text(
+                    text = harmonyState.chordLabel,
+                    style = MaterialTheme.typography.displaySmall.copy(
+                        fontSize = chordSize,
+                        lineHeight = (chordSize.value * 1.06f).sp
+                    ),
+                    color = if (hasActiveNotes) ElectricSky else MutedSlateText.copy(alpha = 0.4f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("monitor_chord_label")
+                )
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                val tempAccent = if (isPure) PitchEmerald else WarmAmber
+                Surface(
+                    color = if (isPure) PitchEmerald.copy(alpha = 0.16f) else WarmAmberContainer,
+                    shape = RoundedCornerShape(4.dp),
+                    border = BorderStroke(1.dp, tempAccent.copy(alpha = 0.85f))
+                ) {
                     Text(
-                        text = "MASTER  |  SUBDIVISIONS",
+                        text = tempLabel,
                         style = MaterialTheme.typography.labelSmall,
+                        fontSize = if (isCompactHeight) 8.5.sp else 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = tempAccent,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            // Tuning & Hold Flags Row: A4 Hz · Transposition · HOLD · PEDAL
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                HarmonyTinyBadge(
+                    text = String.format(Locale.US, "A4 %.1f", harmonyState.referencePitchHz),
+                    color = WarmAmber,
+                    highlighted = false,
+                    isCompactHeight = isCompactHeight,
+                    modifier = Modifier.weight(1.45f)
+                )
+                HarmonyTinyBadge(
+                    text = "KEY ${harmonyState.transposition.shortLabel}",
+                    color = if (harmonyState.transposition.semitoneOffset != 0) WarmAmber else CrispOffWhite,
+                    highlighted = harmonyState.transposition.semitoneOffset != 0,
+                    isCompactHeight = isCompactHeight,
+                    modifier = Modifier.weight(1.05f)
+                )
+                HarmonyTinyBadge(
+                    text = "HOLD",
+                    color = if (harmonyState.chordHoldEnabled) ElectricSky else MutedSlateText,
+                    highlighted = harmonyState.chordHoldEnabled,
+                    isCompactHeight = isCompactHeight,
+                    modifier = Modifier.weight(0.85f)
+                )
+                HarmonyTinyBadge(
+                    text = "PED",
+                    color = if (sustainPedalDown) PitchEmerald else MutedSlateText,
+                    highlighted = sustainPedalDown,
+                    isCompactHeight = isCompactHeight,
+                    modifier = Modifier.weight(0.75f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(if (isCompactHeight) 3.dp else 5.dp))
+
+            // Bottom Strip: Live Held Notes Tuning Readout (cents vs ET in Pure, Hz in Equal)
+            HeldNotesTuningStrip(
+                notes = harmonyState.activePitchInfos,
+                isPure = isPure,
+                isCompactHeight = isCompactHeight
+            )
+        }
+    }
+}
+
+@Composable
+private fun HarmonyTinyBadge(
+    text: String,
+    color: Color,
+    highlighted: Boolean,
+    isCompactHeight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        color = if (highlighted) color.copy(alpha = 0.18f) else ConsoleSurface.copy(alpha = 0.78f),
+        shape = RoundedCornerShape(3.dp),
+        border = BorderStroke(
+            0.8.dp,
+            if (highlighted) color.copy(alpha = 0.8f) else HardwareBorder.copy(alpha = 0.7f)
+        )
+    ) {
+        Text(
+            text = text,
+            fontFamily = JetBrainsMonoFontFamily,
+            fontSize = if (isCompactHeight) 8.sp else 9.5.sp,
+            fontWeight = if (highlighted) FontWeight.Bold else FontWeight.Medium,
+            color = if (highlighted) color else color.copy(alpha = 0.8f),
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 3.dp, vertical = 2.dp)
+        )
+    }
+}
+
+@Composable
+private fun HeldNotesTuningStrip(
+    notes: List<NotePitchInfo>,
+    isPure: Boolean,
+    isCompactHeight: Boolean
+) {
+    val rowHeight = if (isCompactHeight) 22.dp else 26.dp
+
+    if (notes.isEmpty()) {
+        Surface(
+            color = StudioCharcoal.copy(alpha = 0.65f),
+            shape = RoundedCornerShape(4.dp),
+            border = BorderStroke(0.8.dp, LcdBorder),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(rowHeight)
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "NO KEYS HELD · PLAY MIDI KEYBOARD",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = if (isCompactHeight) 8.sp else 9.5.sp,
+                    color = MutedSlateText.copy(alpha = 0.65f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        return
+    }
+
+    val maxVisible = 4
+    val hasOverflow = notes.size > maxVisible
+    val visible = if (hasOverflow) notes.take(maxVisible - 1) else notes
+    val hiddenCount = notes.size - visible.size
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(rowHeight),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        visible.forEach { info ->
+            val isRoot = isPure && info.intervalName == "Root"
+            val noteLabel = if (info.writtenName == info.soundingName) {
+                info.soundingName
+            } else {
+                "${info.writtenName}→${info.soundingName}"
+            }
+            val tuningText = if (isPure) {
+                val sign = if (info.centsOffsetFromEt >= 0.0) "+" else ""
+                String.format(Locale.US, "%s%.1f¢", sign, info.centsOffsetFromEt)
+            } else {
+                String.format(Locale.US, "%.0fHz", info.frequencyHz)
+            }
+            val tuningColor = when {
+                !isPure -> MutedSlateText
+                abs(info.centsOffsetFromEt) < 0.05 -> PitchEmerald
+                info.centsOffsetFromEt < 0.0 -> ElectricSky
+                else -> WarmAmber
+            }
+
+            Surface(
+                color = ConsoleSurface,
+                shape = RoundedCornerShape(4.dp),
+                border = BorderStroke(
+                    0.9.dp,
+                    if (isRoot) PitchEmerald else ElectricSky.copy(alpha = 0.55f)
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = noteLabel,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = if (isCompactHeight) 8.5.sp else 10.sp,
+                        color = if (isRoot) PitchEmerald else CrispOffWhite,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = tuningText,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = if (isCompactHeight) 7.5.sp else 9.sp,
+                        color = tuningColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip
+                    )
+                }
+            }
+        }
+
+        if (hasOverflow) {
+            Surface(
+                color = ConsoleSurface,
+                shape = RoundedCornerShape(4.dp),
+                border = BorderStroke(0.8.dp, HardwareBorder),
+                modifier = Modifier.fillMaxHeight()
+            ) {
+                Box(
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "+$hiddenCount",
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = if (isCompactHeight) 8.5.sp else 10.sp,
                         color = MutedSlateText,
                         maxLines = 1
                     )
                 }
             }
-
-            // 7 Vertical Level Meters: Masters (Tone, Metro) | Subdivisions (Acc, 1/4, 1/8, Trip, 1/16)
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                LevelMeterColumn(
-                    label = "TONE",
-                    level = harmonyState.toneGain,
-                    accentColor = ElectricSky,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-                LevelMeterColumn(
-                    label = "METRO",
-                    level = metronomeState.metronomeGain,
-                    accentColor = PitchEmerald,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-
-                // Visual separator between Master gains and Metronome Subdivisions
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .fillMaxHeight(0.84f)
-                        .background(HardwareBorder)
-                )
-
-                LevelMeterColumn(
-                    label = "ACC",
-                    level = mix.accent,
-                    accentColor = WarmAmber,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-                LevelMeterColumn(
-                    label = "1/4",
-                    level = mix.quarter,
-                    accentColor = ElectricSky,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-                LevelMeterColumn(
-                    label = "1/8",
-                    level = mix.eighth,
-                    accentColor = ElectricSky,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-                LevelMeterColumn(
-                    label = "TRIP",
-                    level = mix.triplet,
-                    accentColor = PitchEmerald,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-                LevelMeterColumn(
-                    label = "1/16",
-                    level = mix.sixteenth,
-                    accentColor = ElectricSky,
-                    isCompactHeight = isCompactHeight,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                )
-            }
         }
-    }
-}
-
-@Composable
-private fun LevelMeterColumn(
-    label: String,
-    level: Float,
-    accentColor: Color,
-    isCompactHeight: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val clamped = level.coerceIn(0f, 1f)
-    val animatedLevel by animateFloatAsState(
-        targetValue = clamped,
-        animationSpec = tween(durationMillis = 80),
-        label = "level_meter_$label"
-    )
-    val percent = (clamped * 100f).roundToInt()
-    val isActive = clamped > 0.005f
-
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 2.dp else 4.dp)
-    ) {
-        Text(
-            text = "$percent%",
-            fontFamily = JetBrainsMonoFontFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = if (isCompactHeight) 9.sp else 11.sp,
-            color = if (isActive) accentColor else MutedSlateText.copy(alpha = 0.55f),
-            maxLines = 1
-        )
-
-        // Recessed studio level bar with 25/50/75% scale reference lines
-        Surface(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            color = LcdMidnight,
-            shape = RoundedCornerShape(6.dp),
-            border = BorderStroke(
-                1.dp,
-                if (isActive) accentColor.copy(alpha = 0.45f) else HardwareBorder.copy(alpha = 0.7f)
-            )
-        ) {
-            Canvas(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(3.dp)
-            ) {
-                val w = size.width
-                val h = size.height
-                val tickColor = HardwareBorder.copy(alpha = 0.45f)
-                for (fraction in floatArrayOf(0.25f, 0.50f, 0.75f)) {
-                    val y = h * (1f - fraction)
-                    drawLine(
-                        color = tickColor,
-                        start = Offset(0f, y),
-                        end = Offset(w, y),
-                        strokeWidth = 1.dp.toPx()
-                    )
-                }
-
-                if (animatedLevel > 0.005f) {
-                    val fillH = (h * animatedLevel).coerceAtLeast(3.dp.toPx())
-                    val topY = h - fillH
-                    val radius = CornerRadius(3.dp.toPx(), 3.dp.toPx())
-                    drawRoundRect(
-                        color = accentColor.copy(alpha = 0.35f),
-                        topLeft = Offset(0f, topY),
-                        size = Size(w, fillH),
-                        cornerRadius = radius
-                    )
-                    // Bright crisp cap bar at the active level height
-                    val capH = 3.dp.toPx().coerceAtMost(fillH)
-                    drawRoundRect(
-                        color = accentColor,
-                        topLeft = Offset(0f, topY),
-                        size = Size(w, capH),
-                        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
-                    )
-                }
-            }
-        }
-
-        Text(
-            text = label,
-            fontFamily = SpaceGroteskFontFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = if (isCompactHeight) 9.sp else 11.sp,
-            color = if (isActive) CrispOffWhite else MutedSlateText.copy(alpha = 0.7f),
-            maxLines = 1
-        )
     }
 }
 
@@ -1543,74 +2206,21 @@ private fun MonitorOutputModeBadge(
         border = BorderStroke(1.dp, accent.copy(alpha = 0.7f))
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+            modifier = Modifier.padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             Icon(
                 imageVector = Icons.Filled.GraphicEq,
                 contentDescription = null,
                 tint = accent,
-                modifier = Modifier.size(13.dp)
+                modifier = Modifier.size(12.dp)
             )
             Text(
                 text = if (isSplit) "L:TONE · R:CLK" else "OUT: MIX",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = accent,
-                maxLines = 1
-            )
-        }
-    }
-}
-
-@Composable
-private fun MonitorMidiFooterStrip(
-    midiState: MidiConnectionUiState,
-    isCompactHeight: Boolean
-) {
-    val isConnected = midiState.connectedDeviceName != null
-    Surface(
-        color = LcdMidnight,
-        shape = MaterialTheme.shapes.small,
-        border = BorderStroke(1.dp, LcdBorder),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(if (isCompactHeight) 24.dp else 28.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Sensors,
-                contentDescription = null,
-                tint = if (isConnected) PitchEmerald else MutedSlateText,
-                modifier = Modifier.size(13.dp)
-            )
-            Text(
-                text = "MIDI:",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = MutedSlateText,
-                maxLines = 1
-            )
-            Text(
-                text = midiState.lastEventText,
-                style = MaterialTheme.typography.labelSmall,
-                color = ElectricSky,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                text = "AWAKE",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = PitchEmerald.copy(alpha = 0.8f),
                 maxLines = 1
             )
         }

@@ -80,6 +80,7 @@ fun HarmonyDirectorScreen(
     val sustainPedalDown by viewModel.sustainPedalDown.collectAsStateWithLifecycle()
     val midiMappings by viewModel.midiMappings.collectAsStateWithLifecycle()
     val learningTarget by viewModel.learningTarget.collectAsStateWithLifecycle()
+    val lastMidiControlPulse by viewModel.lastMidiControlPulse.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by rememberSaveable { mutableStateOf(ConsoleTab.HARMONY) }
@@ -93,6 +94,8 @@ fun HarmonyDirectorScreen(
             metronomeState = metronomeState,
             beatSnapshotFlow = viewModel.beatSnapshot,
             midiState = midiState,
+            midiMappings = midiMappings,
+            lastControlPulse = lastMidiControlPulse,
             sustainPedalDown = sustainPedalDown,
             audioOutputMode = audioOutputMode,
             onExitMonitor = { showMonitorMode = false }

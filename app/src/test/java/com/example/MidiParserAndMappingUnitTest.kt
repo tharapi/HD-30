@@ -291,6 +291,8 @@ class MidiParserAndMappingUnitTest {
             assertEquals(70, vm.midiMappings.value[MidiControlTarget.METRONOME_VOLUME])
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 127, 0))
             assertEquals(1.0f, vm.metronomeState.value.metronomeGain, 1e-4f)
+            assertEquals(MidiControlTarget.METRONOME_VOLUME, vm.lastMidiControlPulse.value.target)
+            assertEquals(70, vm.lastMidiControlPulse.value.cc)
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(70, 0, 0))
             assertEquals(0.0f, vm.metronomeState.value.metronomeGain, 1e-4f)
 
@@ -301,9 +303,12 @@ class MidiParserAndMappingUnitTest {
             vm.selectVoice(ToneVoice.ORGAN)
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
             assertEquals(ToneVoice.BRASS, vm.harmonyState.value.voice)
-            // Repeated high value without release must not double-trigger
+            val seqAfterTrigger = vm.lastMidiControlPulse.value.seq
+            assertEquals(MidiControlTarget.NEXT_TONE_VOICE, vm.lastMidiControlPulse.value.target)
+            // Repeated high value without release must not double-trigger or double-pulse
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
             assertEquals(ToneVoice.BRASS, vm.harmonyState.value.voice)
+            assertEquals(seqAfterTrigger, vm.lastMidiControlPulse.value.seq)
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 0, 0))
             vm.handleMidiHardwareEvent(MidiHardwareEvent.ControlChange(71, 127, 0))
             assertEquals(ToneVoice.WOODWIND, vm.harmonyState.value.voice)

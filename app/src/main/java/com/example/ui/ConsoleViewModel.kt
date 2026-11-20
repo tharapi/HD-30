@@ -93,6 +93,13 @@ enum class MidiControlTarget(
     NEXT_METRONOME_SOUND("Next Click", -1, true)
 }
 
+data class MidiControlPulse(
+    val cc: Int = -1,
+    val target: MidiControlTarget? = null,
+    val value: Int = 0,
+    val seq: Long = 0L
+)
+
 class ConsoleViewModel(
     private val repository: PresetRepository,
     private val audioEngine: HarmonyAudioEngine,
@@ -151,6 +158,9 @@ class ConsoleViewModel(
 
     private val _learningTarget = MutableStateFlow<MidiControlTarget?>(null)
     val learningTarget: StateFlow<MidiControlTarget?> = _learningTarget.asStateFlow()
+
+    private val _lastMidiControlPulse = MutableStateFlow(MidiControlPulse())
+    val lastMidiControlPulse: StateFlow<MidiControlPulse> = _lastMidiControlPulse.asStateFlow()
 
     private val tapTimestampsMs = ArrayDeque<Long>()
     private val noteTracker = MidiNoteStateTracker(clockMs = clockMs)
@@ -515,6 +525,9 @@ class ConsoleViewModel(
         if (matchedTarget != null) {
             if (matchedTarget.isTrigger) {
                 if (value >= 64 && prev < 64) {
+                    _lastMidiControlPulse.update {
+                        MidiControlPulse(cc = cc, target = matchedTarget, value = value, seq = it.seq + 1L)
+                    }
                     when (matchedTarget) {
                         MidiControlTarget.TOGGLE_METRONOME -> toggleMetronomePlaying()
                         MidiControlTarget.TAP_TEMPO -> onTapTempo()
@@ -530,6 +543,9 @@ class ConsoleViewModel(
                     }
                 }
             } else {
+                _lastMidiControlPulse.update {
+                    MidiControlPulse(cc = cc, target = matchedTarget, value = value, seq = it.seq + 1L)
+                }
                 val normalized = (value / 127f).coerceIn(0f, 1f)
                 when (matchedTarget) {
                     MidiControlTarget.TONE_VOLUME -> setToneGain(normalized)
